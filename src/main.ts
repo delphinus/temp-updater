@@ -231,10 +231,3 @@ function removeTriggers(): void {
   });
   Logger.log('トリガーを削除しました');
 }
-
-// グローバルスコープで関数をエクスポート（GASで必要）
-(global as any).setupConfig = setupConfig;
-(global as any).showConfig = showConfig;
-(global as any).updateChart = updateChart;
-(global as any).setupHourlyTrigger = setupHourlyTrigger;
-(global as any).removeTriggers = removeTriggers;
