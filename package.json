@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Google Sheets temperature/humidity chart updater",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp appsscript.json dist/",
     "watch": "tsc --watch",
     "push": "npm run build && clasp push",
     "deploy": "npm run build && clasp push && clasp deploy"
