@@ -190,13 +190,15 @@ function updateChart(): void {
           targetAxisIndex: 0,
           color: '#FF6B6B',
           lineWidth: 2,
-          pointSize: 3
+          pointSize: 3,
+          labelInLegend: '温度'
         },
         1: {
           targetAxisIndex: 1,
           color: '#4ECDC4',
           lineWidth: 2,
-          pointSize: 3
+          pointSize: 3,
+          labelInLegend: '湿度'
         }
       })
       .setOption('vAxes', {
