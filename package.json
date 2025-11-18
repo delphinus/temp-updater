@@ -1,0 +1,16 @@
+{
+  "name": "temp-updater",
+  "version": "1.0.0",
+  "description": "Google Sheets temperature/humidity chart updater",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "push": "npm run build && clasp push",
+    "deploy": "npm run build && clasp push && clasp deploy"
+  },
+  "devDependencies": {
+    "@google/clasp": "^2.4.2",
+    "@types/google-apps-script": "^1.0.83",
+    "typescript": "^5.3.3"
+  }
+}
