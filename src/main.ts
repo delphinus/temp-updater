@@ -125,14 +125,40 @@ function updateChart(): void {
     const chartData: any[][] = [];
     chartData.push(['時刻', '温度 (℃)', '湿度 (%)']); // ヘッダー
 
+    // 温度と湿度の最小値・最大値を計算するための配列
+    const temperatures: number[] = [];
+    const humidities: number[] = [];
+
     for (let i = 1; i < recentData.length; i++) {
       const row = recentData[i];
+      const temp = Number(row[tempColIndex]);
+      const humidity = Number(row[humidityColIndex]);
+
       chartData.push([
         new Date(row[timestampColIndex]),
-        row[tempColIndex],
-        row[humidityColIndex]
+        temp,
+        humidity
       ]);
+
+      temperatures.push(temp);
+      humidities.push(humidity);
     }
+
+    // 温度の範囲を計算（マージン付き）
+    const tempMin = Math.min(...temperatures);
+    const tempMax = Math.max(...temperatures);
+    const tempRange = tempMax - tempMin;
+    const tempMargin = Math.max(tempRange * 0.1, 1); // 範囲の10%、最低1度のマージン
+    const tempViewMin = Math.floor(tempMin - tempMargin);
+    const tempViewMax = Math.ceil(tempMax + tempMargin);
+
+    // 湿度の範囲を計算（マージン付き）
+    const humidityMin = Math.min(...humidities);
+    const humidityMax = Math.max(...humidities);
+    const humidityRange = humidityMax - humidityMin;
+    const humidityMargin = Math.max(humidityRange * 0.1, 2); // 範囲の10%、最低2%のマージン
+    const humidityViewMin = Math.floor(humidityMin - humidityMargin);
+    const humidityViewMax = Math.ceil(humidityMax + humidityMargin);
 
     // データをチャートシートに書き込み
     const dataRange = chartSheet.getRange(1, 1, chartData.length, 3);
@@ -176,14 +202,20 @@ function updateChart(): void {
       .setOption('vAxes', {
         0: {
           title: '温度 (℃)',
-          viewWindowMode: 'auto',
+          viewWindow: {
+            min: tempViewMin,
+            max: tempViewMax
+          },
           minorGridlines: {
             count: 4
           }
         },
         1: {
           title: '湿度 (%)',
-          viewWindowMode: 'auto',
+          viewWindow: {
+            min: humidityViewMin,
+            max: humidityViewMax
+          },
           minorGridlines: {
             count: 4
           }
