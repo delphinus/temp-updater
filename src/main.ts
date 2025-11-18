@@ -154,18 +154,39 @@ function updateChart(): void {
         title: '時刻',
         format: 'M/d HH:mm',
         slantedText: true,
-        slantedTextAngle: 45
+        slantedTextAngle: 45,
+        minorGridlines: {
+          count: 5
+        }
       })
       .setOption('series', {
         0: {
+          targetAxisIndex: 0,
           color: '#FF6B6B',
           lineWidth: 2,
           pointSize: 3
         },
         1: {
+          targetAxisIndex: 1,
           color: '#4ECDC4',
           lineWidth: 2,
           pointSize: 3
+        }
+      })
+      .setOption('vAxes', {
+        0: {
+          title: '温度 (℃)',
+          viewWindowMode: 'auto',
+          minorGridlines: {
+            count: 4
+          }
+        },
+        1: {
+          title: '湿度 (%)',
+          viewWindowMode: 'auto',
+          minorGridlines: {
+            count: 4
+          }
         }
       })
       .setOption('curveType', 'function')
