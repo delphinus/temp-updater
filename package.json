@@ -5,7 +5,8 @@
   "scripts": {
     "build": "tsc && cp appsscript.json dist/",
     "watch": "tsc --watch",
-    "push": "npm run build && clasp push",
+    "push": "npm run build && clasp push && clasp run updateChart",
+    "push:only": "npm run build && clasp push",
     "deploy": "npm run build && clasp push && clasp deploy"
   },
   "devDependencies": {

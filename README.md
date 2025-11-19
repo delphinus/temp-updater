@@ -40,11 +40,24 @@ npm install
 
 初めてclaspを使用する場合は、Googleアカウントでログインします。
 
+#### 2-1. Google Apps Script API を有効にする
+
+1. https://script.google.com/home/usersettings にアクセス
+2. 「Google Apps Script API」をオンにする
+
+これにより、`clasp run` コマンドでGAS関数を実行できるようになります。
+
+#### 2-2. clasp ログイン
+
 ```bash
 npx clasp login
 ```
 
 ブラウザが開くので、Googleアカウントでログインして認証を完了してください。
+
+**重要**: 認証画面で以下の権限を必ず承認してください：
+- Google Apps Script API へのアクセス
+- スプレッドシートへのアクセス
 
 ### 3. 既存スプレッドシートにGASプロジェクトを作成
 
@@ -105,13 +118,24 @@ Google フォームと連携している既存のスプレッドシートにGAS�
 ### ビルドとデプロイ
 
 ```bash
-# TypeScriptをビルドしてGASにプッシュ
+# TypeScriptをビルドしてGASにプッシュし、グラフを自動更新
 npm run push
 
+# グラフの自動更新なしでプッシュのみ行う場合
+npm run push:only
+
 # または、個別に実行
-npm run build    # TypeScriptをコンパイル
-npx clasp push   # GASにアップロード
+npm run build         # TypeScriptをコンパイル
+npx clasp push        # GASにアップロード
+npx clasp run updateChart  # グラフを更新
 ```
+
+**注意**: `npm run push` を実行すると、以下が自動的に実行されます：
+1. TypeScriptのビルド
+2. GASへのプッシュ
+3. `updateChart` 関数の実行（グラフの自動更新）
+
+初回は `setupConfig` を先に実行する必要があります。
 
 ### GAS エディタで確認
 
