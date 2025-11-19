@@ -1,4 +1,22 @@
 /**
+ * シート設定の型定義
+ */
+interface SheetConfig {
+  dataSheetName: string;
+  chartSheetName: string;
+  chartTitle: string;
+}
+
+/**
+ * データ欠損情報の型定義
+ */
+interface DataGapInfo {
+  sheetName: string;
+  latestTimestamp: Date;
+  timeDiffMinutes: number;
+}
+
+/**
  * スクリプトプロパティから設定値を取得するヘルパー関数
  * GitHubに機密情報をコミットしないため、PropertiesServiceを使用
  */
@@ -15,11 +33,18 @@ function getConfig(key: string, defaultValue: string = ''): string {
 }
 
 /**
+ * シート設定の配列を取得
+ */
+function getSheetConfigs(): SheetConfig[] {
+  const json = getConfig('SHEET_CONFIGS');
+  return JSON.parse(json);
+}
+
+/**
  * 初回セットアップ: スクリプトプロパティに設定を保存
  *
  * この関数を実行する前に、以下の値を自分の環境に合わせて編集してください：
- * - DATA_SHEET_NAME: Google フォームの回答が記録されるシート名
- * - CHART_SHEET_NAME: グラフを配置するシート名
+ * - sheetConfigs: 各データシートとグラフシートの設定
  * - SLACK_WEBHOOK_URL: Slack Incoming Webhook URL（データ欠損通知用）
  *
  * 注: このスクリプトはスプレッドシートに紐付いているため、スプレッドシートIDは不要です。
@@ -30,18 +55,32 @@ function setupConfig(): void {
   const properties = PropertiesService.getScriptProperties();
 
   // ここに自分の環境に合わせた値を設定してください
+  const sheetConfigs: SheetConfig[] = [
+    {
+      dataSheetName: 'フォームの回答 1',
+      chartSheetName: 'グラフ1',
+      chartTitle: '温度・湿度の推移（最近2日間） - センサー1'
+    },
+    {
+      dataSheetName: 'フォームの回答 2',
+      chartSheetName: 'グラフ2',
+      chartTitle: '温度・湿度の推移（最近2日間） - センサー2'
+    }
+  ];
+
   const config = {
-    'DATA_SHEET_NAME': 'フォームの回答 1',
-    'CHART_SHEET_NAME': 'グラフ',
-    'CHART_TITLE': '温度・湿度の推移（最近2日間）',
+    'SHEET_CONFIGS': JSON.stringify(sheetConfigs),
     'SLACK_WEBHOOK_URL': 'https://hooks.slack.com/services/YOUR/WEBHOOK/URL'
   };
 
   properties.setProperties(config);
 
   Logger.log('設定を保存しました:');
-  Logger.log(JSON.stringify(config, null, 2));
-  Logger.log('\n設定完了！updateChart() を実行してグラフを作成できます。');
+  Logger.log(`シート設定数: ${sheetConfigs.length}`);
+  sheetConfigs.forEach((sheet, index) => {
+    Logger.log(`[${index + 1}] ${sheet.dataSheetName} → ${sheet.chartSheetName}`);
+  });
+  Logger.log('\n設定完了！updateAllCharts() を実行してグラフを作成できます。');
 }
 
 /**
@@ -49,18 +88,22 @@ function setupConfig(): void {
  */
 function showConfig(): void {
   const properties = PropertiesService.getScriptProperties();
-  const keys = ['DATA_SHEET_NAME', 'CHART_SHEET_NAME', 'CHART_TITLE', 'SLACK_WEBHOOK_URL'];
 
   Logger.log('現在の設定:');
-  keys.forEach(key => {
-    const value = properties.getProperty(key);
-    if (key === 'SLACK_WEBHOOK_URL' && value) {
-      // Webhook URLは一部のみ表示
-      Logger.log(`${key}: ${value.substring(0, 30)}...`);
-    } else {
-      Logger.log(`${key}: ${value || '(未設定)'}`);
-    }
+
+  // シート設定を表示
+  const sheetConfigs = getSheetConfigs();
+  Logger.log(`\nシート設定数: ${sheetConfigs.length}`);
+  sheetConfigs.forEach((sheet, index) => {
+    Logger.log(`\n[${index + 1}]`);
+    Logger.log(`  データシート: ${sheet.dataSheetName}`);
+    Logger.log(`  グラフシート: ${sheet.chartSheetName}`);
+    Logger.log(`  グラフタイトル: ${sheet.chartTitle}`);
   });
+
+  // Slack Webhook URL
+  const webhookUrl = properties.getProperty('SLACK_WEBHOOK_URL');
+  Logger.log(`\nSlack Webhook URL: ${webhookUrl ? webhookUrl.substring(0, 30) + '...' : '(未設定)'}`);
 
   // スプレッドシート情報も表示
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
@@ -101,22 +144,19 @@ function sendSlackNotification(message: string): void {
 }
 
 /**
- * メイン関数: グラフを更新
- * この関数を毎時実行するようにトリガーを設定します
+ * 単一シートのグラフを更新
+ * @param config シート設定
+ * @returns データ欠損がある場合はその情報、なければnull
  */
-function updateChart(): void {
+function updateSingleChart(config: SheetConfig): DataGapInfo | null {
   try {
-    // スクリプトプロパティから設定を取得
-    const DATA_SHEET_NAME = getConfig('DATA_SHEET_NAME');
-    const CHART_SHEET_NAME = getConfig('CHART_SHEET_NAME');
-    const CHART_TITLE = getConfig('CHART_TITLE');
-
     // このスクリプトが紐付いているスプレッドシートを取得
     const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-    const dataSheet = spreadsheet.getSheetByName(DATA_SHEET_NAME);
+    const dataSheet = spreadsheet.getSheetByName(config.dataSheetName);
 
     if (!dataSheet) {
-      throw new Error(`データシート "${DATA_SHEET_NAME}" が見つかりません`);
+      Logger.log(`警告: データシート "${config.dataSheetName}" が見つかりません`);
+      return null;
     }
 
     // 最近2日分のデータを取得
@@ -143,8 +183,8 @@ function updateChart(): void {
     });
 
     if (recentData.length <= 1) {
-      Logger.log('最近2日分のデータが見つかりません');
-      return;
+      Logger.log(`${config.dataSheetName}: 最近2日分のデータが見つかりません`);
+      return null;
     }
 
     // 最新データのタイムスタンプをチェック（1時間30分以上前かどうか）
@@ -153,25 +193,21 @@ function updateChart(): void {
     const now = new Date();
     const timeDiffMinutes = (now.getTime() - latestTimestamp.getTime()) / (1000 * 60);
 
+    // データ欠損情報を保存（後でまとめて通知）
+    let dataGapInfo: DataGapInfo | null = null;
     if (timeDiffMinutes > 90) {
-      // 1時間30分以上前のデータしかない場合、Slackに通知
-      const latestTimeFormatted = Utilities.formatDate(
-        latestTimestamp,
-        Session.getScriptTimeZone(),
-        'yyyy/MM/dd HH:mm:ss'
-      );
-      const message = `:warning: *温度・湿度データの更新が停止している可能性があります*\n` +
-        `最新データ: ${latestTimeFormatted}\n` +
-        `経過時間: 約${Math.floor(timeDiffMinutes)}分`;
-
-      sendSlackNotification(message);
-      Logger.log(`データ欠損を検出しました。最新データ: ${latestTimeFormatted}`);
+      dataGapInfo = {
+        sheetName: config.dataSheetName,
+        latestTimestamp: latestTimestamp,
+        timeDiffMinutes: timeDiffMinutes
+      };
+      Logger.log(`${config.dataSheetName}: データ欠損を検出（経過時間: ${Math.floor(timeDiffMinutes)}分）`);
     }
 
     // グラフシートを取得または作成
-    let chartSheet = spreadsheet.getSheetByName(CHART_SHEET_NAME);
+    let chartSheet = spreadsheet.getSheetByName(config.chartSheetName);
     if (!chartSheet) {
-      chartSheet = spreadsheet.insertSheet(CHART_SHEET_NAME);
+      chartSheet = spreadsheet.insertSheet(config.chartSheetName);
     }
 
     // 既存のグラフとデータを削除
@@ -253,7 +289,7 @@ function updateChart(): void {
       .setChartType(Charts.ChartType.LINE)
       .addRange(chartSheet.getRange(1, 1, chartData.length, 3))
       .setPosition(1, 1, 0, 0)
-      .setOption('title', CHART_TITLE)
+      .setOption('title', config.chartTitle)
       .setOption('subtitle', subtitle)
       .setOption('width', 1000)
       .setOption('height', 500)
@@ -310,11 +346,12 @@ function updateChart(): void {
 
     chartSheet.insertChart(chart);
 
-    Logger.log('グラフを更新しました');
-    Logger.log(`データ件数: ${recentData.length - 1}件`);
+    Logger.log(`${config.dataSheetName}: グラフを更新しました（データ件数: ${recentData.length - 1}件）`);
+
+    return dataGapInfo;
   } catch (error) {
-    Logger.log(`エラー: ${error}`);
-    throw error;
+    Logger.log(`${config.dataSheetName}: エラー: ${error}`);
+    return null;
   }
 }
 
@@ -328,6 +365,55 @@ function findColumnIndex(headers: any[], columnName: string): number {
     }
   }
   return -1;
+}
+
+/**
+ * 全シートのグラフを更新
+ * この関数を毎時実行するようにトリガーを設定します
+ */
+function updateAllCharts(): void {
+  Logger.log('=== グラフ更新開始 ===');
+
+  const sheetConfigs = getSheetConfigs();
+  const dataGaps: DataGapInfo[] = [];
+
+  // 各シートのグラフを更新
+  sheetConfigs.forEach((config, index) => {
+    Logger.log(`\n[${index + 1}/${sheetConfigs.length}] ${config.dataSheetName} を処理中...`);
+    const gapInfo = updateSingleChart(config);
+    if (gapInfo) {
+      dataGaps.push(gapInfo);
+    }
+  });
+
+  // データ欠損がある場合、まとめてSlack通知を送信
+  if (dataGaps.length > 0) {
+    let message = ':warning: *温度・湿度データの更新が停止している可能性があります*\n\n';
+    dataGaps.forEach(gap => {
+      const timeFormatted = Utilities.formatDate(
+        gap.latestTimestamp,
+        Session.getScriptTimeZone(),
+        'yyyy/MM/dd HH:mm:ss'
+      );
+      message += `*${gap.sheetName}*\n`;
+      message += `  最新データ: ${timeFormatted}\n`;
+      message += `  経過時間: 約${Math.floor(gap.timeDiffMinutes)}分\n\n`;
+    });
+
+    sendSlackNotification(message);
+    Logger.log(`\nデータ欠損を${dataGaps.length}件検出しました。Slack通知を送信しました。`);
+  } else {
+    Logger.log('\n✓ 全シートのデータは正常に更新されています。');
+  }
+
+  Logger.log('=== グラフ更新完了 ===');
+}
+
+/**
+ * 後方互換性のため、updateChart()という名前でupdateAllCharts()を呼び出す
+ */
+function updateChart(): void {
+  updateAllCharts();
 }
 
 /**
@@ -381,52 +467,60 @@ function testSlackNotification(): void {
 }
 
 /**
- * 最新データのタイムスタンプを確認
+ * 全シートの最新データのタイムスタンプを確認
  * データ欠損チェックのテストに使用できます
  */
 function checkLatestDataTimestamp(): void {
   try {
-    const DATA_SHEET_NAME = getConfig('DATA_SHEET_NAME');
+    const sheetConfigs = getSheetConfigs();
     const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-    const dataSheet = spreadsheet.getSheetByName(DATA_SHEET_NAME);
-
-    if (!dataSheet) {
-      throw new Error(`データシート "${DATA_SHEET_NAME}" が見つかりません`);
-    }
-
-    const allData = dataSheet.getDataRange().getValues();
-    if (allData.length <= 1) {
-      Logger.log('データが見つかりません');
-      return;
-    }
-
-    const timestampColIndex = 0;
-    const latestDataRow = allData[allData.length - 1];
-    const latestTimestamp = new Date(latestDataRow[timestampColIndex]);
     const now = new Date();
-    const timeDiffMinutes = (now.getTime() - latestTimestamp.getTime()) / (1000 * 60);
-
-    const latestTimeFormatted = Utilities.formatDate(
-      latestTimestamp,
-      Session.getScriptTimeZone(),
-      'yyyy/MM/dd HH:mm:ss'
-    );
     const nowFormatted = Utilities.formatDate(
       now,
       Session.getScriptTimeZone(),
       'yyyy/MM/dd HH:mm:ss'
     );
 
-    Logger.log('=== 最新データのタイムスタンプチェック ===');
-    Logger.log(`現在時刻: ${nowFormatted}`);
-    Logger.log(`最新データ: ${latestTimeFormatted}`);
-    Logger.log(`経過時間: 約${Math.floor(timeDiffMinutes)}分`);
+    Logger.log('=== 全シートの最新データタイムスタンプチェック ===');
+    Logger.log(`現在時刻: ${nowFormatted}\n`);
 
-    if (timeDiffMinutes > 90) {
-      Logger.log('⚠️ 1時間30分以上経過しています。Slack通知が送信される状態です。');
-    } else {
-      Logger.log('✓ データは正常に更新されています。');
-    }
+    sheetConfigs.forEach((config, index) => {
+      Logger.log(`[${index + 1}] ${config.dataSheetName}`);
+
+      const dataSheet = spreadsheet.getSheetByName(config.dataSheetName);
+      if (!dataSheet) {
+        Logger.log(`  ⚠️ シートが見つかりません\n`);
+        return;
+      }
+
+      const allData = dataSheet.getDataRange().getValues();
+      if (allData.length <= 1) {
+        Logger.log(`  ⚠️ データが見つかりません\n`);
+        return;
+      }
+
+      const timestampColIndex = 0;
+      const latestDataRow = allData[allData.length - 1];
+      const latestTimestamp = new Date(latestDataRow[timestampColIndex]);
+      const timeDiffMinutes = (now.getTime() - latestTimestamp.getTime()) / (1000 * 60);
+
+      const latestTimeFormatted = Utilities.formatDate(
+        latestTimestamp,
+        Session.getScriptTimeZone(),
+        'yyyy/MM/dd HH:mm:ss'
+      );
+
+      Logger.log(`  最新データ: ${latestTimeFormatted}`);
+      Logger.log(`  経過時間: 約${Math.floor(timeDiffMinutes)}分`);
+
+      if (timeDiffMinutes > 90) {
+        Logger.log('  ⚠️ 1時間30分以上経過しています。Slack通知が送信される状態です。\n');
+      } else {
+        Logger.log('  ✓ データは正常に更新されています。\n');
+      }
+    });
+
+    Logger.log('=== チェック完了 ===');
   } catch (error) {
     Logger.log(`エラー: ${error}`);
     throw error;
