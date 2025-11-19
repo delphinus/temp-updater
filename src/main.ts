@@ -20,6 +20,7 @@ function getConfig(key: string, defaultValue: string = ''): string {
  * この関数を実行する前に、以下の値を自分の環境に合わせて編集してください：
  * - DATA_SHEET_NAME: Google フォームの回答が記録されるシート名
  * - CHART_SHEET_NAME: グラフを配置するシート名
+ * - SLACK_WEBHOOK_URL: Slack Incoming Webhook URL（データ欠損通知用）
  *
  * 注: このスクリプトはスプレッドシートに紐付いているため、スプレッドシートIDは不要です。
  *
@@ -32,7 +33,8 @@ function setupConfig(): void {
   const config = {
     'DATA_SHEET_NAME': 'フォームの回答 1',
     'CHART_SHEET_NAME': 'グラフ',
-    'CHART_TITLE': '温度・湿度の推移（最近2日間）'
+    'CHART_TITLE': '温度・湿度の推移（最近2日間）',
+    'SLACK_WEBHOOK_URL': 'https://hooks.slack.com/services/YOUR/WEBHOOK/URL'
   };
 
   properties.setProperties(config);
@@ -47,12 +49,17 @@ function setupConfig(): void {
  */
 function showConfig(): void {
   const properties = PropertiesService.getScriptProperties();
-  const keys = ['DATA_SHEET_NAME', 'CHART_SHEET_NAME', 'CHART_TITLE'];
+  const keys = ['DATA_SHEET_NAME', 'CHART_SHEET_NAME', 'CHART_TITLE', 'SLACK_WEBHOOK_URL'];
 
   Logger.log('現在の設定:');
   keys.forEach(key => {
     const value = properties.getProperty(key);
-    Logger.log(`${key}: ${value || '(未設定)'}`);
+    if (key === 'SLACK_WEBHOOK_URL' && value) {
+      // Webhook URLは一部のみ表示
+      Logger.log(`${key}: ${value.substring(0, 30)}...`);
+    } else {
+      Logger.log(`${key}: ${value || '(未設定)'}`);
+    }
   });
 
   // スプレッドシート情報も表示
@@ -61,6 +68,36 @@ function showConfig(): void {
   Logger.log(`名前: ${spreadsheet.getName()}`);
   Logger.log(`ID: ${spreadsheet.getId()}`);
   Logger.log(`URL: ${spreadsheet.getUrl()}`);
+}
+
+/**
+ * Slackに通知を送信
+ */
+function sendSlackNotification(message: string): void {
+  try {
+    const webhookUrl = getConfig('SLACK_WEBHOOK_URL');
+
+    const payload = {
+      text: message,
+      username: '温度・湿度モニター',
+      icon_emoji: ':thermometer:'
+    };
+
+    const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    };
+
+    const response = UrlFetchApp.fetch(webhookUrl, options);
+
+    if (response.getResponseCode() !== 200) {
+      Logger.log(`Slack通知の送信に失敗しました: ${response.getContentText()}`);
+    }
+  } catch (error) {
+    Logger.log(`Slack通知エラー: ${error}`);
+  }
 }
 
 /**
@@ -108,6 +145,27 @@ function updateChart(): void {
     if (recentData.length <= 1) {
       Logger.log('最近2日分のデータが見つかりません');
       return;
+    }
+
+    // 最新データのタイムスタンプをチェック（1時間30分以上前かどうか）
+    const latestDataRow = recentData[recentData.length - 1];
+    const latestTimestamp = new Date(latestDataRow[timestampColIndex]);
+    const now = new Date();
+    const timeDiffMinutes = (now.getTime() - latestTimestamp.getTime()) / (1000 * 60);
+
+    if (timeDiffMinutes > 90) {
+      // 1時間30分以上前のデータしかない場合、Slackに通知
+      const latestTimeFormatted = Utilities.formatDate(
+        latestTimestamp,
+        Session.getScriptTimeZone(),
+        'yyyy/MM/dd HH:mm:ss'
+      );
+      const message = `:warning: *温度・湿度データの更新が停止している可能性があります*\n` +
+        `最新データ: ${latestTimeFormatted}\n` +
+        `経過時間: 約${Math.floor(timeDiffMinutes)}分`;
+
+      sendSlackNotification(message);
+      Logger.log(`データ欠損を検出しました。最新データ: ${latestTimeFormatted}`);
     }
 
     // グラフシートを取得または作成
@@ -308,4 +366,69 @@ function removeTriggers(): void {
     }
   });
   Logger.log('トリガーを削除しました');
+}
+
+/**
+ * Slack通知のテスト送信
+ * この関数を実行して、Slack通知が正しく動作するか確認してください
+ */
+function testSlackNotification(): void {
+  const testMessage = ':white_check_mark: *Slack通知テスト*\n' +
+    'この通知が表示されていれば、設定は正しく完了しています。';
+
+  sendSlackNotification(testMessage);
+  Logger.log('テスト通知を送信しました');
+}
+
+/**
+ * 最新データのタイムスタンプを確認
+ * データ欠損チェックのテストに使用できます
+ */
+function checkLatestDataTimestamp(): void {
+  try {
+    const DATA_SHEET_NAME = getConfig('DATA_SHEET_NAME');
+    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    const dataSheet = spreadsheet.getSheetByName(DATA_SHEET_NAME);
+
+    if (!dataSheet) {
+      throw new Error(`データシート "${DATA_SHEET_NAME}" が見つかりません`);
+    }
+
+    const allData = dataSheet.getDataRange().getValues();
+    if (allData.length <= 1) {
+      Logger.log('データが見つかりません');
+      return;
+    }
+
+    const timestampColIndex = 0;
+    const latestDataRow = allData[allData.length - 1];
+    const latestTimestamp = new Date(latestDataRow[timestampColIndex]);
+    const now = new Date();
+    const timeDiffMinutes = (now.getTime() - latestTimestamp.getTime()) / (1000 * 60);
+
+    const latestTimeFormatted = Utilities.formatDate(
+      latestTimestamp,
+      Session.getScriptTimeZone(),
+      'yyyy/MM/dd HH:mm:ss'
+    );
+    const nowFormatted = Utilities.formatDate(
+      now,
+      Session.getScriptTimeZone(),
+      'yyyy/MM/dd HH:mm:ss'
+    );
+
+    Logger.log('=== 最新データのタイムスタンプチェック ===');
+    Logger.log(`現在時刻: ${nowFormatted}`);
+    Logger.log(`最新データ: ${latestTimeFormatted}`);
+    Logger.log(`経過時間: 約${Math.floor(timeDiffMinutes)}分`);
+
+    if (timeDiffMinutes > 90) {
+      Logger.log('⚠️ 1時間30分以上経過しています。Slack通知が送信される状態です。');
+    } else {
+      Logger.log('✓ データは正常に更新されています。');
+    }
+  } catch (error) {
+    Logger.log(`エラー: ${error}`);
+    throw error;
+  }
 }
