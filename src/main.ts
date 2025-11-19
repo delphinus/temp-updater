@@ -121,14 +121,15 @@ function updateChart(): void {
     charts.forEach(chart => chartSheet.removeChart(chart));
     chartSheet.clear();
 
-    // グラフ用のデータを作成（タイムスタンプ、温度、湿度、アノテーション付き）
+    // グラフ用のデータを作成（タイムスタンプ、温度、湿度の3列）
     const chartData: any[][] = [];
-    chartData.push(['時刻', '温度 (℃)', { role: 'annotation' }, '湿度 (%)', { role: 'annotation' }]); // ヘッダー
+    chartData.push(['時刻', '温度 (℃)', '湿度 (%)']); // ヘッダー
 
     // 温度と湿度の最小値・最大値を計算するための配列とデータ
     const temperatures: number[] = [];
     const humidities: number[] = [];
     const dataRows: any[][] = [];
+    const timestamps: Date[] = [];
 
     for (let i = 1; i < recentData.length; i++) {
       const row = recentData[i];
@@ -139,6 +140,7 @@ function updateChart(): void {
       dataRows.push([timestamp, temp, humidity]);
       temperatures.push(temp);
       humidities.push(humidity);
+      timestamps.push(timestamp);
     }
 
     // 温度の範囲を計算（マージン付き）
@@ -163,50 +165,38 @@ function updateChart(): void {
     const humidityMinIndex = humidities.indexOf(humidityMin);
     const humidityMaxIndex = humidities.indexOf(humidityMax);
 
-    // データ行にアノテーションを追加
+    // データ行を追加（3列のみ）
     for (let i = 0; i < dataRows.length; i++) {
       const [timestamp, temp, humidity] = dataRows[i];
-      let tempAnnotation = null;
-      let humidityAnnotation = null;
-
-      // 温度の最小値・最大値にアノテーションを追加
-      if (i === tempMinIndex) {
-        const timeStr = Utilities.formatDate(timestamp, Session.getScriptTimeZone(), 'M/d HH:mm');
-        tempAnnotation = `最低 ${temp}℃\n${timeStr}`;
-      } else if (i === tempMaxIndex) {
-        const timeStr = Utilities.formatDate(timestamp, Session.getScriptTimeZone(), 'M/d HH:mm');
-        tempAnnotation = `最高 ${temp}℃\n${timeStr}`;
-      }
-
-      // 湿度の最小値・最大値にアノテーションを追加
-      if (i === humidityMinIndex) {
-        const timeStr = Utilities.formatDate(timestamp, Session.getScriptTimeZone(), 'M/d HH:mm');
-        humidityAnnotation = `最低 ${humidity}%\n${timeStr}`;
-      } else if (i === humidityMaxIndex) {
-        const timeStr = Utilities.formatDate(timestamp, Session.getScriptTimeZone(), 'M/d HH:mm');
-        humidityAnnotation = `最高 ${humidity}%\n${timeStr}`;
-      }
-
-      chartData.push([timestamp, temp, tempAnnotation, humidity, humidityAnnotation]);
+      chartData.push([timestamp, temp, humidity]);
     }
 
+    // サブタイトルを作成（最小値・最大値の情報を含む）
+    const tempMinTime = Utilities.formatDate(timestamps[tempMinIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
+    const tempMaxTime = Utilities.formatDate(timestamps[tempMaxIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
+    const humidityMinTime = Utilities.formatDate(timestamps[humidityMinIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
+    const humidityMaxTime = Utilities.formatDate(timestamps[humidityMaxIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
+
+    const subtitle = `温度: 最低 ${tempMin}℃ (${tempMinTime}) / 最高 ${tempMax}℃ (${tempMaxTime})   湿度: 最低 ${humidityMin}% (${humidityMinTime}) / 最高 ${humidityMax}% (${humidityMaxTime})`;
+
     // データをチャートシートに書き込み
-    const dataRange = chartSheet.getRange(1, 1, chartData.length, 5);
+    const dataRange = chartSheet.getRange(1, 1, chartData.length, 3);
     dataRange.setValues(chartData);
 
     // タイムスタンプ列のフォーマット設定
     chartSheet.getRange(2, 1, chartData.length - 1, 1)
       .setNumberFormat('m/d hh:mm');
 
-    // データ列を非表示にする（A, B, C, D, E列）
-    chartSheet.hideColumns(1, 5);
+    // データ列を非表示にする（A, B, C列）
+    chartSheet.hideColumns(1, 3);
 
     // グラフを作成
     const chart = chartSheet.newChart()
       .setChartType(Charts.ChartType.LINE)
-      .addRange(chartSheet.getRange(1, 1, chartData.length, 5))
+      .addRange(chartSheet.getRange(1, 1, chartData.length, 3))
       .setPosition(1, 1, 0, 0)
       .setOption('title', CHART_TITLE)
+      .setOption('subtitle', subtitle)
       .setOption('width', 1000)
       .setOption('height', 500)
       .setOption('hAxis', {
@@ -223,14 +213,14 @@ function updateChart(): void {
           targetAxisIndex: 0,
           color: '#FF6B6B',
           lineWidth: 2,
-          pointSize: 3,
+          pointSize: 5,
           labelInLegend: '温度'
         },
         1: {
           targetAxisIndex: 1,
           color: '#4ECDC4',
           lineWidth: 2,
-          pointSize: 3,
+          pointSize: 5,
           labelInLegend: '湿度'
         }
       })
