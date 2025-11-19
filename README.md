@@ -34,7 +34,15 @@ asdf set nodejs 24.11.1
 
 # 依存パッケージをインストール
 npm install
+
+# Git hooksをセットアップ
+./scripts/setup-hooks.sh
 ```
+
+**Git hooksについて:**
+- pre-commit hookが自動的にインストールされます
+- これにより、`setupConfig()` に本番の設定値（Webhook URLやシート名など）が含まれている場合、コミットが自動的に拒否されます
+- 機密情報の誤コミットを防ぐためのセーフティネットです
 
 ### 2. clasp の初期設定
 
@@ -216,6 +224,10 @@ temp-updater/
 │   └── main.ts          # メインスクリプト（TypeScript）
 ├── dist/
 │   └── main.js          # ビルド済みスクリプト
+├── scripts/
+│   ├── hooks/
+│   │   └── pre-commit   # Git pre-commit hook
+│   └── setup-hooks.sh   # Hookセットアップスクリプト
 ├── appsscript.json      # GAS設定ファイル
 ├── package.json         # npm設定
 ├── tsconfig.json        # TypeScript設定

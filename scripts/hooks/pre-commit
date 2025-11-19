@@ -1,0 +1,51 @@
+#!/bin/bash
+
+# setupConfig()にデフォルト値以外の値が含まれていないかチェック
+
+set -e
+
+echo "🔍 setupConfig()のデフォルト値チェックを実行中..."
+
+# src/main.tsの内容を取得
+if [ -f "src/main.ts" ]; then
+  content=$(cat src/main.ts)
+
+  # デフォルト値以外が含まれていないかチェック
+  errors=()
+
+  # Slack Webhook URLのチェック
+  if echo "$content" | grep -q "SLACK_WEBHOOK_URL.*https://hooks.slack.com/services/[^Y]"; then
+    errors+=("⚠️  SLACK_WEBHOOK_URL にデフォルト値以外の値が設定されています")
+  fi
+
+  # データシート名のチェック（デフォルト値以外が含まれている場合）
+  if echo "$content" | grep -A 20 "function setupConfig" | grep "dataSheetName:" | grep -v "フォームの回答 1\|フォームの回答 2" | grep -q "dataSheetName:"; then
+    errors+=("⚠️  dataSheetName にデフォルト値以外の値が設定されています")
+  fi
+
+  # グラフシート名のチェック（デフォルト値以外が含まれている場合）
+  if echo "$content" | grep -A 20 "function setupConfig" | grep "chartSheetName:" | grep -v "グラフ1\|グラフ2" | grep -q "chartSheetName:"; then
+    errors+=("⚠️  chartSheetName にデフォルト値以外の値が設定されています")
+  fi
+
+  if [ ${#errors[@]} -gt 0 ]; then
+    echo ""
+    echo "❌ コミットが拒否されました："
+    echo ""
+    for error in "${errors[@]}"; do
+      echo "$error"
+    done
+    echo ""
+    echo "setupConfig() 内の値をデフォルト値に戻してからコミットしてください。"
+    echo ""
+    echo "デフォルト値："
+    echo "  - SLACK_WEBHOOK_URL: 'https://hooks.slack.com/services/YOUR/WEBHOOK/URL'"
+    echo "  - dataSheetName: 'フォームの回答 1', 'フォームの回答 2'"
+    echo "  - chartSheetName: 'グラフ1', 'グラフ2'"
+    echo ""
+    exit 1
+  fi
+fi
+
+echo "✓ setupConfig()のチェックが完了しました"
+exit 0
