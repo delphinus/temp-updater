@@ -121,25 +121,22 @@ function updateChart(): void {
     charts.forEach(chart => chartSheet.removeChart(chart));
     chartSheet.clear();
 
-    // グラフ用のデータを作成（タイムスタンプ、温度、湿度の3列）
+    // グラフ用のデータを作成（タイムスタンプ、温度、湿度、アノテーション付き）
     const chartData: any[][] = [];
-    chartData.push(['時刻', '温度 (℃)', '湿度 (%)']); // ヘッダー
+    chartData.push(['時刻', '温度 (℃)', { role: 'annotation' }, '湿度 (%)', { role: 'annotation' }]); // ヘッダー
 
-    // 温度と湿度の最小値・最大値を計算するための配列
+    // 温度と湿度の最小値・最大値を計算するための配列とデータ
     const temperatures: number[] = [];
     const humidities: number[] = [];
+    const dataRows: any[][] = [];
 
     for (let i = 1; i < recentData.length; i++) {
       const row = recentData[i];
       const temp = Number(row[tempColIndex]);
       const humidity = Number(row[humidityColIndex]);
+      const timestamp = new Date(row[timestampColIndex]);
 
-      chartData.push([
-        new Date(row[timestampColIndex]),
-        temp,
-        humidity
-      ]);
-
+      dataRows.push([timestamp, temp, humidity]);
       temperatures.push(temp);
       humidities.push(humidity);
     }
@@ -160,21 +157,54 @@ function updateChart(): void {
     const humidityViewMin = Math.floor(humidityMin - humidityMargin);
     const humidityViewMax = Math.ceil(humidityMax + humidityMargin);
 
+    // 最小値・最大値のインデックスを見つける
+    const tempMinIndex = temperatures.indexOf(tempMin);
+    const tempMaxIndex = temperatures.indexOf(tempMax);
+    const humidityMinIndex = humidities.indexOf(humidityMin);
+    const humidityMaxIndex = humidities.indexOf(humidityMax);
+
+    // データ行にアノテーションを追加
+    for (let i = 0; i < dataRows.length; i++) {
+      const [timestamp, temp, humidity] = dataRows[i];
+      let tempAnnotation = null;
+      let humidityAnnotation = null;
+
+      // 温度の最小値・最大値にアノテーションを追加
+      if (i === tempMinIndex) {
+        const timeStr = Utilities.formatDate(timestamp, Session.getScriptTimeZone(), 'M/d HH:mm');
+        tempAnnotation = `最低 ${temp}℃\n${timeStr}`;
+      } else if (i === tempMaxIndex) {
+        const timeStr = Utilities.formatDate(timestamp, Session.getScriptTimeZone(), 'M/d HH:mm');
+        tempAnnotation = `最高 ${temp}℃\n${timeStr}`;
+      }
+
+      // 湿度の最小値・最大値にアノテーションを追加
+      if (i === humidityMinIndex) {
+        const timeStr = Utilities.formatDate(timestamp, Session.getScriptTimeZone(), 'M/d HH:mm');
+        humidityAnnotation = `最低 ${humidity}%\n${timeStr}`;
+      } else if (i === humidityMaxIndex) {
+        const timeStr = Utilities.formatDate(timestamp, Session.getScriptTimeZone(), 'M/d HH:mm');
+        humidityAnnotation = `最高 ${humidity}%\n${timeStr}`;
+      }
+
+      chartData.push([timestamp, temp, tempAnnotation, humidity, humidityAnnotation]);
+    }
+
     // データをチャートシートに書き込み
-    const dataRange = chartSheet.getRange(1, 1, chartData.length, 3);
+    const dataRange = chartSheet.getRange(1, 1, chartData.length, 5);
     dataRange.setValues(chartData);
 
     // タイムスタンプ列のフォーマット設定
     chartSheet.getRange(2, 1, chartData.length - 1, 1)
       .setNumberFormat('m/d hh:mm');
 
-    // データ列を非表示にする（A, B, C列）
-    chartSheet.hideColumns(1, 3);
+    // データ列を非表示にする（A, B, C, D, E列）
+    chartSheet.hideColumns(1, 5);
 
     // グラフを作成
     const chart = chartSheet.newChart()
       .setChartType(Charts.ChartType.LINE)
-      .addRange(chartSheet.getRange(1, 1, chartData.length, 3))
+      .addRange(chartSheet.getRange(1, 1, chartData.length, 5))
       .setPosition(1, 1, 0, 0)
       .setOption('title', CHART_TITLE)
       .setOption('width', 1000)
