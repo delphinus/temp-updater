@@ -5,8 +5,7 @@
   "scripts": {
     "build": "tsc && cp appsscript.json dist/",
     "watch": "tsc --watch",
-    "push": "npm run build && clasp push && clasp run updateChart",
-    "push:only": "npm run build && clasp push",
+    "push": "npm run build && clasp push && echo '\n✓ プッシュ完了\n→ GASエディタで updateChart 関数を実行してグラフを更新してください\n→ GASエディタを開く: npx clasp open\n'",
     "deploy": "npm run build && clasp push && clasp deploy"
   },
   "devDependencies": {
