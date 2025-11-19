@@ -168,11 +168,14 @@ function updateChart(): void {
     chartSheet.getRange(2, 1, chartData.length - 1, 1)
       .setNumberFormat('m/d hh:mm');
 
+    // データ列を非表示にする（A, B, C列）
+    chartSheet.hideColumns(1, 3);
+
     // グラフを作成
     const chart = chartSheet.newChart()
       .setChartType(Charts.ChartType.LINE)
       .addRange(chartSheet.getRange(1, 1, chartData.length, 3))
-      .setPosition(2, 5, 0, 0)
+      .setPosition(1, 1, 0, 0)
       .setOption('title', CHART_TITLE)
       .setOption('width', 1000)
       .setOption('height', 500)
