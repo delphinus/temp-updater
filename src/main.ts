@@ -5,6 +5,34 @@ interface SheetConfig {
   dataSheetName: string;
   chartSheetName: string;
   chartTitle: string;
+  postalCode: string;
+}
+
+/**
+ * 緯度経度の型定義
+ */
+interface LatLon {
+  lat: number;
+  lon: number;
+}
+
+/**
+ * アメダス観測所の型定義
+ */
+interface AmedasStation {
+  id: string;
+  name: string;
+  lat: number;
+  lon: number;
+  alt: number;
+}
+
+/**
+ * 気温データの型定義
+ */
+interface TemperatureData {
+  timestamp: Date;
+  temperature: number | null;
 }
 
 /**
@@ -34,17 +62,26 @@ function getConfig(key: string, defaultValue: string = ''): string {
 
 /**
  * シート設定の配列を取得
+ * データシート名から、グラフシート名とタイトルを自動生成
  */
 function getSheetConfigs(): SheetConfig[] {
   const json = getConfig('SHEET_CONFIGS');
-  return JSON.parse(json);
+  const configs: Array<{ dataSheetName: string; postalCode: string }> = JSON.parse(json);
+
+  return configs.map(config => ({
+    dataSheetName: config.dataSheetName,
+    chartSheetName: `${config.dataSheetName}のグラフ`,
+    chartTitle: `温度・湿度の推移（最近2日間）- ${config.dataSheetName}`,
+    postalCode: config.postalCode
+  }));
 }
 
 /**
  * 初回セットアップ: スクリプトプロパティに設定を保存
  *
  * この関数を実行する前に、以下の値を自分の環境に合わせて編集してください：
- * - sheetConfigs: 各データシートとグラフシートの設定
+ * - sheetConfigs: データシート名と外気温取得用の郵便番号のリスト
+ *   （グラフシート名とタイトルは自動生成されます）
  * - SLACK_WEBHOOK_URL: Slack Incoming Webhook URL（データ欠損通知用）
  *
  * 注: このスクリプトはスプレッドシートに紐付いているため、スプレッドシートIDは不要です。
@@ -55,16 +92,15 @@ function setupConfig(): void {
   const properties = PropertiesService.getScriptProperties();
 
   // ここに自分の環境に合わせた値を設定してください
-  const sheetConfigs: SheetConfig[] = [
+  // データシート名と郵便番号を指定（グラフシート名とタイトルは自動生成されます）
+  const sheetConfigs = [
     {
       dataSheetName: 'フォームの回答 1',
-      chartSheetName: 'グラフ1',
-      chartTitle: '温度・湿度の推移（最近2日間） - センサー1'
+      postalCode: '1000001'  // 外気温取得用の郵便番号（ハイフンなし7桁）
     },
     {
       dataSheetName: 'フォームの回答 2',
-      chartSheetName: 'グラフ2',
-      chartTitle: '温度・湿度の推移（最近2日間） - センサー2'
+      postalCode: '1000001'  // 外気温取得用の郵便番号（ハイフンなし7桁）
     }
   ];
 
@@ -78,7 +114,7 @@ function setupConfig(): void {
   Logger.log('設定を保存しました:');
   Logger.log(`シート設定数: ${sheetConfigs.length}`);
   sheetConfigs.forEach((sheet, index) => {
-    Logger.log(`[${index + 1}] ${sheet.dataSheetName} → ${sheet.chartSheetName}`);
+    Logger.log(`[${index + 1}] ${sheet.dataSheetName} → ${sheet.dataSheetName}のグラフ (郵便番号: ${sheet.postalCode})`);
   });
   Logger.log('\n設定完了！updateAllCharts() を実行してグラフを作成できます。');
 }
@@ -99,6 +135,7 @@ function showConfig(): void {
     Logger.log(`  データシート: ${sheet.dataSheetName}`);
     Logger.log(`  グラフシート: ${sheet.chartSheetName}`);
     Logger.log(`  グラフタイトル: ${sheet.chartTitle}`);
+    Logger.log(`  郵便番号（外気温）: ${sheet.postalCode}`);
   });
 
   // Slack Webhook URL
@@ -215,12 +252,12 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
     charts.forEach(chart => chartSheet.removeChart(chart));
     chartSheet.clear();
 
-    // グラフ用のデータを作成（タイムスタンプ、温度、湿度の3列）
+    // グラフ用のデータを作成（タイムスタンプ、室内温度、湿度、外気温の4列）
     const chartData: any[][] = [];
-    chartData.push(['時刻', '温度 (℃)', '湿度 (%)']); // ヘッダー
+    chartData.push(['時刻', '室内温度 (℃)', '湿度 (%)', '外気温 (℃)']); // ヘッダー
 
     // 温度と湿度の最小値・最大値を計算するための配列とデータ
-    const temperatures: number[] = [];
+    const indoorTemperatures: number[] = [];
     const humidities: number[] = [];
     const dataRows: any[][] = [];
     const timestamps: Date[] = [];
@@ -232,14 +269,28 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
       const timestamp = new Date(row[timestampColIndex]);
 
       dataRows.push([timestamp, temp, humidity]);
-      temperatures.push(temp);
+      indoorTemperatures.push(temp);
       humidities.push(humidity);
       timestamps.push(timestamp);
     }
 
-    // 温度の範囲を計算（マージン付き）
-    const tempMin = Math.min(...temperatures);
-    const tempMax = Math.max(...temperatures);
+    // 外気温データを取得
+    Logger.log('外気温データを取得中...');
+    const stationId = getAmedasStationId(config.postalCode);
+    const outdoorTempData = getTemperatureHistory(stationId, timestamps);
+    const outdoorTemperatures: number[] = [];
+
+    // 外気温をdataRowsに追加
+    for (let i = 0; i < dataRows.length; i++) {
+      const outdoorTemp = outdoorTempData[i].temperature;
+      outdoorTemperatures.push(outdoorTemp !== null ? outdoorTemp : NaN);
+    }
+
+    // 温度の範囲を計算（室内温度と外気温の両方を含む、マージン付き）
+    const validOutdoorTemps = outdoorTemperatures.filter(t => !isNaN(t));
+    const allTemperatures = [...indoorTemperatures, ...validOutdoorTemps];
+    const tempMin = Math.min(...allTemperatures);
+    const tempMax = Math.max(...allTemperatures);
     const tempRange = tempMax - tempMin;
     const tempMargin = Math.max(tempRange * 0.1, 1); // 範囲の10%、最低1度のマージン
     const tempViewMin = Math.floor(tempMin - tempMargin);
@@ -254,40 +305,60 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
     const humidityViewMax = Math.ceil(humidityMax + humidityMargin);
 
     // 最小値・最大値のインデックスを見つける
-    const tempMinIndex = temperatures.indexOf(tempMin);
-    const tempMaxIndex = temperatures.indexOf(tempMax);
+    const indoorTempMin = Math.min(...indoorTemperatures);
+    const indoorTempMax = Math.max(...indoorTemperatures);
+    const indoorTempMinIndex = indoorTemperatures.indexOf(indoorTempMin);
+    const indoorTempMaxIndex = indoorTemperatures.indexOf(indoorTempMax);
     const humidityMinIndex = humidities.indexOf(humidityMin);
     const humidityMaxIndex = humidities.indexOf(humidityMax);
 
-    // データ行を追加（3列のみ）
+    const outdoorTempMin = validOutdoorTemps.length > 0 ? Math.min(...validOutdoorTemps) : null;
+    const outdoorTempMax = validOutdoorTemps.length > 0 ? Math.max(...validOutdoorTemps) : null;
+    let outdoorTempMinIndex = -1;
+    let outdoorTempMaxIndex = -1;
+    if (outdoorTempMin !== null) {
+      outdoorTempMinIndex = outdoorTemperatures.indexOf(outdoorTempMin);
+    }
+    if (outdoorTempMax !== null) {
+      outdoorTempMaxIndex = outdoorTemperatures.indexOf(outdoorTempMax);
+    }
+
+    // データ行を追加（4列：時刻、室内温度、湿度、外気温）
     for (let i = 0; i < dataRows.length; i++) {
-      const [timestamp, temp, humidity] = dataRows[i];
-      chartData.push([timestamp, temp, humidity]);
+      const [timestamp, indoorTemp, humidity] = dataRows[i];
+      const outdoorTemp = outdoorTemperatures[i];
+      chartData.push([timestamp, indoorTemp, humidity, isNaN(outdoorTemp) ? null : outdoorTemp]);
     }
 
     // サブタイトルを作成（最小値・最大値の情報を含む）
-    const tempMinTime = Utilities.formatDate(timestamps[tempMinIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
-    const tempMaxTime = Utilities.formatDate(timestamps[tempMaxIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
+    const indoorTempMinTime = Utilities.formatDate(timestamps[indoorTempMinIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
+    const indoorTempMaxTime = Utilities.formatDate(timestamps[indoorTempMaxIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
     const humidityMinTime = Utilities.formatDate(timestamps[humidityMinIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
     const humidityMaxTime = Utilities.formatDate(timestamps[humidityMaxIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
 
-    const subtitle = `温度: 最低 ${tempMin}℃ (${tempMinTime}) / 最高 ${tempMax}℃ (${tempMaxTime})   湿度: 最低 ${humidityMin}% (${humidityMinTime}) / 最高 ${humidityMax}% (${humidityMaxTime})`;
+    let subtitle = `室内: 最低 ${indoorTempMin}℃ (${indoorTempMinTime}) / 最高 ${indoorTempMax}℃ (${indoorTempMaxTime})   湿度: 最低 ${humidityMin}% (${humidityMinTime}) / 最高 ${humidityMax}% (${humidityMaxTime})`;
+
+    if (outdoorTempMin !== null && outdoorTempMax !== null && outdoorTempMinIndex >= 0 && outdoorTempMaxIndex >= 0) {
+      const outdoorTempMinTime = Utilities.formatDate(timestamps[outdoorTempMinIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
+      const outdoorTempMaxTime = Utilities.formatDate(timestamps[outdoorTempMaxIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
+      subtitle += `   外気: 最低 ${outdoorTempMin}℃ (${outdoorTempMinTime}) / 最高 ${outdoorTempMax}℃ (${outdoorTempMaxTime})`;
+    }
 
     // データをチャートシートに書き込み
-    const dataRange = chartSheet.getRange(1, 1, chartData.length, 3);
+    const dataRange = chartSheet.getRange(1, 1, chartData.length, 4);
     dataRange.setValues(chartData);
 
     // タイムスタンプ列のフォーマット設定
     chartSheet.getRange(2, 1, chartData.length - 1, 1)
       .setNumberFormat('m/d hh:mm');
 
-    // データ列を非表示にする（A, B, C列）
-    chartSheet.hideColumns(1, 3);
+    // データ列を非表示にする（A, B, C, D列）
+    chartSheet.hideColumns(1, 4);
 
     // グラフを作成
     const chart = chartSheet.newChart()
       .setChartType(Charts.ChartType.LINE)
-      .addRange(chartSheet.getRange(1, 1, chartData.length, 3))
+      .addRange(chartSheet.getRange(1, 1, chartData.length, 4))
       .setPosition(1, 1, 0, 0)
       .setOption('title', config.chartTitle)
       .setOption('subtitle', subtitle)
@@ -308,7 +379,7 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
           color: '#FF6B6B',
           lineWidth: 2,
           pointSize: 5,
-          labelInLegend: '温度'
+          labelInLegend: '室内温度'
         },
         1: {
           targetAxisIndex: 1,
@@ -316,6 +387,13 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
           lineWidth: 2,
           pointSize: 5,
           labelInLegend: '湿度'
+        },
+        2: {
+          targetAxisIndex: 0,
+          color: '#FFA500',
+          lineWidth: 2,
+          pointSize: 5,
+          labelInLegend: '外気温'
         }
       })
       .setOption('vAxes', {
@@ -525,4 +603,178 @@ function checkLatestDataTimestamp(): void {
     Logger.log(`エラー: ${error}`);
     throw error;
   }
+}
+
+/**
+ * 郵便番号から緯度経度を取得
+ * HeartRails Geo APIを使用（無料、登録不要）
+ */
+function getLatLonFromPostalCode(postalCode: string): LatLon {
+  try {
+    const url = `https://geoapi.heartrails.com/api/json?method=searchByPostal&postal=${postalCode}`;
+    const response = UrlFetchApp.fetch(url);
+    const json = JSON.parse(response.getContentText());
+
+    if (json.response && json.response.location && json.response.location.length > 0) {
+      const location = json.response.location[0];
+      return {
+        lat: parseFloat(location.y),
+        lon: parseFloat(location.x)
+      };
+    } else {
+      throw new Error(`郵便番号 ${postalCode} の緯度経度が見つかりませんでした`);
+    }
+  } catch (error) {
+    Logger.log(`郵便番号変換エラー: ${error}`);
+    throw error;
+  }
+}
+
+/**
+ * 2点間の距離を計算（Haversine公式）
+ * @returns 距離（km）
+ */
+function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371; // 地球の半径（km）
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+/**
+ * 最寄りのアメダス観測所を検索
+ */
+function findNearestAmedasStation(lat: number, lon: number): AmedasStation {
+  try {
+    // アメダス観測所一覧を取得
+    const url = 'https://www.jma.go.jp/bosai/amedas/const/amedastable.json';
+    const response = UrlFetchApp.fetch(url);
+    const stations = JSON.parse(response.getContentText());
+
+    let nearestStation: AmedasStation | null = null;
+    let minDistance = Number.MAX_VALUE;
+
+    // 全観測所から最寄りを検索
+    for (const [id, station] of Object.entries(stations)) {
+      const stationData = station as any;
+
+      // 緯度経度を度分形式から10進数に変換
+      const stationLat = stationData.lat[0] + stationData.lat[1] / 60;
+      const stationLon = stationData.lon[0] + stationData.lon[1] / 60;
+
+      // 距離を計算
+      const distance = calculateDistance(lat, lon, stationLat, stationLon);
+
+      if (distance < minDistance) {
+        minDistance = distance;
+        nearestStation = {
+          id: id,
+          name: stationData.kjName,
+          lat: stationLat,
+          lon: stationLon,
+          alt: stationData.alt
+        };
+      }
+    }
+
+    if (!nearestStation) {
+      throw new Error('最寄りのアメダス観測所が見つかりませんでした');
+    }
+
+    Logger.log(`最寄りアメダス観測所: ${nearestStation.name} (${nearestStation.id}), 距離: ${minDistance.toFixed(1)}km`);
+    return nearestStation;
+  } catch (error) {
+    Logger.log(`観測所検索エラー: ${error}`);
+    throw error;
+  }
+}
+
+/**
+ * 指定時刻の気温データを取得
+ */
+function getTemperatureAtTime(stationId: string, datetime: Date): number | null {
+  try {
+    // 気象庁APIのURL形式: YYYYMMDDHH0000.json (毎正時)
+    const year = datetime.getFullYear();
+    const month = String(datetime.getMonth() + 1).padStart(2, '0');
+    const day = String(datetime.getDate()).padStart(2, '0');
+    const hour = String(datetime.getHours()).padStart(2, '0');
+    const dateTimeStr = `${year}${month}${day}${hour}0000`;
+
+    const url = `https://www.jma.go.jp/bosai/amedas/data/map/${dateTimeStr}.json`;
+    const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+
+    if (response.getResponseCode() !== 200) {
+      Logger.log(`気温データ取得失敗: ${datetime}, HTTPステータス: ${response.getResponseCode()}`);
+      return null;
+    }
+
+    const json = JSON.parse(response.getContentText());
+
+    if (json[stationId] && json[stationId].temp && json[stationId].temp.length > 0) {
+      return json[stationId].temp[0];
+    } else {
+      Logger.log(`気温データなし: ${datetime}, 観測所: ${stationId}`);
+      return null;
+    }
+  } catch (error) {
+    Logger.log(`気温データ取得エラー: ${datetime}, ${error}`);
+    return null;
+  }
+}
+
+/**
+ * 複数時刻の気温データを取得
+ */
+function getTemperatureHistory(stationId: string, timestamps: Date[]): TemperatureData[] {
+  const results: TemperatureData[] = [];
+
+  for (const timestamp of timestamps) {
+    // 正時に丸める（気象庁APIは毎正時のデータのみ）
+    const roundedTime = new Date(timestamp);
+    roundedTime.setMinutes(0, 0, 0);
+
+    const temp = getTemperatureAtTime(stationId, roundedTime);
+    results.push({
+      timestamp: timestamp,
+      temperature: temp
+    });
+
+    // API負荷軽減のため、少し待機
+    Utilities.sleep(100);
+  }
+
+  return results;
+}
+
+/**
+ * 郵便番号から最寄りアメダス観測所のIDを取得してキャッシュ
+ * 毎回API呼び出しを避けるため、Cacheサービスを使用
+ * @param postalCode 郵便番号（ハイフンなし7桁）
+ */
+function getAmedasStationId(postalCode: string): string {
+  const cache = CacheService.getScriptCache();
+  const cacheKey = `amedas_station_id_${postalCode}`;
+
+  // キャッシュから取得を試みる（24時間有効）
+  let stationId = cache.get(cacheKey);
+
+  if (!stationId) {
+    // キャッシュになければ新規取得
+    const latlon = getLatLonFromPostalCode(postalCode);
+    const station = findNearestAmedasStation(latlon.lat, latlon.lon);
+    stationId = station.id;
+
+    // キャッシュに保存（24時間 = 86400秒）
+    cache.put(cacheKey, stationId, 86400);
+
+    Logger.log(`アメダス観測所を設定（郵便番号: ${postalCode}）: ${station.name} (${stationId})`);
+  }
+
+  return stationId;
 }
