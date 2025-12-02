@@ -3,3 +3,5 @@ dist/
 .clasp.json
 .clasprc.json
 .claude/
+.env
+src/config.ts

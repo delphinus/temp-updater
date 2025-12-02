@@ -3,9 +3,10 @@
   "version": "1.0.0",
   "description": "Google Sheets temperature/humidity chart updater",
   "scripts": {
-    "build": "tsc && cp appsscript.json dist/",
+    "setup": "node scripts/setup-clasp.js",
+    "build": "node scripts/generate-config.js && tsc && node scripts/generate-config.js && cp appsscript.json dist/ && cp src/sidebar.html dist/",
     "watch": "tsc --watch",
-    "push": "npm run build && clasp push && echo '\n✓ プッシュ完了\n→ GASエディタで updateChart 関数を実行してグラフを更新してください\n→ GASエディタを開く: npx clasp open\n'",
+    "push": "npm run build && clasp push && echo '\n✓ プッシュ完了\n→ GASエディタで setupConfig 関数を実行して設定を保存してください\n→ GASエディタを開く: npx clasp open\n'",
     "deploy": "npm run build && clasp push && clasp deploy",
     "prepare": "husky"
   },
