@@ -306,7 +306,7 @@
     function initializeCustomDates() {
       const today = new Date();
       const endDate = formatDate(today);
-      const startDate = formatDate(new Date(today.getTime() - 2 * 24 * 60 * 60 * 1000));
+      const startDate = formatDate(new Date(today.getTime() - 1 * 24 * 60 * 60 * 1000));
 
       document.getElementById('endDate').value = endDate;
       document.getElementById('startDate').value = startDate;
@@ -368,7 +368,7 @@
       } else {
         const end = new Date();
         endDate = formatDate(end);
-        const start = new Date(end.getTime() - selectedDays * 24 * 60 * 60 * 1000);
+        const start = new Date(end.getTime() - (selectedDays - 1) * 24 * 60 * 60 * 1000);
         startDate = formatDate(start);
       }
 

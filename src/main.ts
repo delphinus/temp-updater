@@ -294,7 +294,6 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
     }
 
     // 外気温データを取得（スプレッドシートキャッシュ優先）
-    Logger.log('外気温データを取得中...');
     const stationId = getAmedasStationId(config.postalCode);
     const outdoorTempData = getOutdoorTemperatureWithCache(stationId, timestamps);
     const outdoorTemperatures: number[] = [];
@@ -374,6 +373,10 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
     // データ列を非表示にする（A, B, C, D列）
     chartSheet.hideColumns(1, 4);
 
+    // データポイント数に応じてpointSizeを調整（100件以上なら丸を非表示）
+    const dataPointCount = chartData.length - 1; // ヘッダー行を除く
+    const pointSize = dataPointCount > 100 ? 0 : 5;
+
     // グラフを作成
     const chart = chartSheet.newChart()
       .setChartType(Charts.ChartType.LINE)
@@ -397,21 +400,21 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
           targetAxisIndex: 0,
           color: '#FF6B6B',
           lineWidth: 2,
-          pointSize: 5,
+          pointSize: pointSize,
           labelInLegend: '室内温度'
         },
         1: {
           targetAxisIndex: 1,
           color: '#4ECDC4',
           lineWidth: 2,
-          pointSize: 5,
+          pointSize: pointSize,
           labelInLegend: '湿度'
         },
         2: {
           targetAxisIndex: 0,
           color: '#FFA500',
           lineWidth: 2,
-          pointSize: 5,
+          pointSize: pointSize,
           labelInLegend: '外気温'
         }
       })
@@ -819,32 +822,107 @@ function getOrCreateOutdoorTempSheet(): GoogleAppsScript.Spreadsheet.Sheet {
     // ヘッダー行を追加
     sheet.getRange(1, 1, 1, 3).setValues([['タイムスタンプ', '観測所ID', '気温']]);
     sheet.getRange(1, 1, 1, 3).setFontWeight('bold');
-    Logger.log(`外気温データ保存用シート "${OUTDOOR_TEMP_SHEET_NAME}" を作成しました`);
   }
 
   return sheet;
 }
 
 /**
- * 外気温データをスプレッドシートに保存
+ * 外気温データシートの重複を削除
+ * GASエディタから手動で実行する関数
+ */
+function removeDuplicateOutdoorData(): void {
+  const sheet = getOrCreateOutdoorTempSheet();
+  const allData = sheet.getDataRange().getValues();
+
+  if (allData.length <= 1) {
+    Logger.log('データがありません');
+    return;
+  }
+
+  // ヘッダーを除くデータ
+  const headers = allData[0];
+  const dataRows = allData.slice(1);
+
+  Logger.log(`処理前: ${dataRows.length}行のデータ`);
+
+  // 重複を除去（観測所ID + 正時に丸めたタイムスタンプ）
+  const uniqueData = new Map<string, any[]>();
+
+  for (const row of dataRows) {
+    const timestamp = new Date(row[0]);
+    const stationId = String(row[1]);
+    const temperature = row[2];
+
+    // 正時に丸めてキーを作成
+    const roundedTime = new Date(timestamp);
+    roundedTime.setMinutes(0, 0, 0);
+    const key = `${stationId}_${roundedTime.getTime()}`;
+
+    // 既に存在しない場合のみ追加（最初に出現したものを保持）
+    if (!uniqueData.has(key)) {
+      uniqueData.set(key, [timestamp, stationId, temperature]);
+    }
+  }
+
+  const uniqueRows = Array.from(uniqueData.values());
+  Logger.log(`重複削除後: ${uniqueRows.length}行のデータ（${dataRows.length - uniqueRows.length}行削除）`);
+
+  // シートをクリアして再書き込み
+  sheet.clear();
+  sheet.getRange(1, 1, 1, 3).setValues([headers]);
+  sheet.getRange(1, 1, 1, 3).setFontWeight('bold');
+
+  if (uniqueRows.length > 0) {
+    sheet.getRange(2, 1, uniqueRows.length, 3).setValues(uniqueRows);
+  }
+
+  Logger.log('重複削除が完了しました');
+}
+
+/**
+ * 外気温データをスプレッドシートに保存（重複チェック付き）
  * @param stationId 観測所ID
  * @param data 気温データの配列
  */
 function saveOutdoorTemperatureData(stationId: string, data: TemperatureData[]): void {
   const sheet = getOrCreateOutdoorTempSheet();
-  const rows: any[][] = [];
+
+  // 既存データを読み込んで重複チェック用のSetを作成
+  const allData = sheet.getDataRange().getValues();
+  const existingKeys = new Set<string>();
+
+  for (let i = 1; i < allData.length; i++) {
+    const row = allData[i];
+    const timestamp = new Date(row[0]);
+    const rowStationId = String(row[1]);
+
+    // 正時に丸めてキーを作成
+    const roundedTime = new Date(timestamp);
+    roundedTime.setMinutes(0, 0, 0);
+    const key = `${rowStationId}_${roundedTime.getTime()}`;
+    existingKeys.add(key);
+  }
+
+  // 重複していないデータのみを追加
+  const newRows: any[][] = [];
 
   for (const item of data) {
     if (item.temperature !== null) {
-      rows.push([item.timestamp, stationId, item.temperature]);
+      // 正時に丸めてキーを作成
+      const roundedTime = new Date(item.timestamp);
+      roundedTime.setMinutes(0, 0, 0);
+      const key = `${stationId}_${roundedTime.getTime()}`;
+
+      if (!existingKeys.has(key)) {
+        newRows.push([item.timestamp, stationId, item.temperature]);
+        existingKeys.add(key); // 今回追加するデータ内での重複も防ぐ
+      }
     }
   }
 
-  if (rows.length > 0) {
-    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, 3).setValues(rows);
-    Logger.log(`外気温データを${rows.length}件保存しました（観測所ID: ${stationId}）`);
-  } else {
-    Logger.log(`保存する外気温データがありません（観測所ID: ${stationId}）`);
+  if (newRows.length > 0) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, 3).setValues(newRows);
   }
 }
 
@@ -864,18 +942,6 @@ function loadOutdoorTemperatureData(
   const allData = sheet.getDataRange().getValues();
   const dataMap = new Map<number, number>();
 
-  Logger.log(`外気温データシートの総行数: ${allData.length}行（ヘッダー含む）`);
-  Logger.log(`検索条件: 観測所ID=${stationId}, 期間=${Utilities.formatDate(startDate, Session.getScriptTimeZone(), 'yyyy/MM/dd')} ～ ${Utilities.formatDate(endDate, Session.getScriptTimeZone(), 'yyyy/MM/dd')}`);
-
-  // デバッグ: 最初の数行を出力
-  if (allData.length > 1) {
-    Logger.log(`シートの最初の数行（デバッグ用）:`);
-    for (let i = 1; i < Math.min(4, allData.length); i++) {
-      const row = allData[i];
-      Logger.log(`  行${i}: タイムスタンプ=${row[0]}, 観測所ID='${row[1]}', 気温=${row[2]}`);
-    }
-  }
-
   // ヘッダー行をスキップして、指定期間のデータを読み込む
   for (let i = 1; i < allData.length; i++) {
     const row = allData[i];
@@ -893,7 +959,6 @@ function loadOutdoorTemperatureData(
     }
   }
 
-  Logger.log(`スプレッドシートから外気温データを${dataMap.size}件読み込みました（観測所ID: ${stationId}）`);
   return dataMap;
 }
 
@@ -953,7 +1018,6 @@ function getOutdoorTemperatureWithCache(
 
   // 欠けているデータをAPIから取得
   if (missingData.length > 0) {
-    Logger.log(`外気温データの欠損を検出: ${missingData.length}件をAPIから取得します`);
     const fetchedData = getTemperatureHistory(stationId, missingData);
 
     // 取得したデータをスプレッドシートに保存
@@ -1039,7 +1103,7 @@ function updateChartWithDateRange(
 
     Logger.log(`グラフ更新: ${config.dataSheetName}, 期間: ${startDateStr} ～ ${endDateStr}`);
 
-    const daysDiff = Math.floor((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
+    const daysDiff = Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
 
     if (daysDiff >= 30) {
       // 1ヶ月以上の場合は日次集計グラフを作成
@@ -1128,7 +1192,6 @@ function updateShortPeriodChart(
   }
 
   // 外気温データを取得（スプレッドシートキャッシュ優先）
-  Logger.log('外気温データを取得中...');
   const stationId = getAmedasStationId(config.postalCode);
   const outdoorTempData = getOutdoorTemperatureWithCache(stationId, timestamps);
   const outdoorTemperatures: number[] = [];
@@ -1206,6 +1269,10 @@ function updateShortPeriodChart(
   // データ列を非表示
   chartSheet.hideColumns(1, 4);
 
+  // データポイント数に応じてpointSizeを調整（100件以上なら丸を非表示）
+  const dataPointCount = chartData.length - 1; // ヘッダー行を除く
+  const pointSize = dataPointCount > 100 ? 0 : 5;
+
   // グラフを作成
   const chartTitle = `温度・湿度の推移（${daysDiff}日間）- ${config.dataSheetName}`;
   const chart = chartSheet.newChart()
@@ -1228,21 +1295,21 @@ function updateShortPeriodChart(
         targetAxisIndex: 0,
         color: '#FF6B6B',
         lineWidth: 2,
-        pointSize: 5,
+        pointSize: pointSize,
         labelInLegend: '室内温度'
       },
       1: {
         targetAxisIndex: 1,
         color: '#4ECDC4',
         lineWidth: 2,
-        pointSize: 5,
+        pointSize: pointSize,
         labelInLegend: '湿度'
       },
       2: {
         targetAxisIndex: 0,
         color: '#FFA500',
         lineWidth: 2,
-        pointSize: 5,
+        pointSize: pointSize,
         labelInLegend: '外気温'
       }
     })
@@ -1339,7 +1406,6 @@ function updateLongPeriodChart(
 
   // 外気温の日次最高・最低を取得
   if (options.showOutdoorTemp) {
-    Logger.log('外気温の日次データを取得中...');
     const stationId = getAmedasStationId(config.postalCode);
 
     for (const dailyData of dailyDataArray) {
@@ -1544,12 +1610,18 @@ function updateLongPeriodChart(
  * スプレッドシートキャッシュを優先的に使用
  */
 function getDailyOutdoorTemperature(stationId: string, date: Date): { max: number | null, min: number | null } {
-  // その日の0時から23時までのタイムスタンプを作成
+  // その日の0時から23時までのタイムスタンプを作成（ただし未来の時刻は除く）
   const timestamps: Date[] = [];
+  const now = new Date();
+
   for (let hour = 0; hour < 24; hour++) {
     const datetime = new Date(date);
     datetime.setHours(hour, 0, 0, 0);
-    timestamps.push(datetime);
+
+    // 未来の時刻はスキップ
+    if (datetime <= now) {
+      timestamps.push(datetime);
+    }
   }
 
   // スプレッドシートキャッシュ優先で外気温データを取得
