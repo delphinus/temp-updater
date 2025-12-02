@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    body {
+      font-family: 'Roboto', Arial, sans-serif;
+      margin: 0;
+      padding: 16px;
+      background-color: #f5f5f5;
+    }
+
+    h2 {
+      margin-top: 0;
+      color: #202124;
+      font-size: 18px;
+      font-weight: 500;
+    }
+
+    .section {
+      background: white;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 16px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+    }
+
+    .section-title {
+      font-size: 14px;
+      font-weight: 500;
+      color: #5f6368;
+      margin-bottom: 12px;
+    }
+
+    .period-buttons {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .period-btn {
+      padding: 10px;
+      border: 1px solid #dadce0;
+      border-radius: 4px;
+      background: white;
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.2s;
+    }
+
+    .period-btn:hover {
+      background: #f8f9fa;
+      border-color: #1a73e8;
+    }
+
+    .period-btn.active {
+      background: #e8f0fe;
+      border-color: #1a73e8;
+      color: #1a73e8;
+      font-weight: 500;
+    }
+
+    .custom-date {
+      margin-top: 12px;
+    }
+
+    .date-input-group {
+      margin-bottom: 8px;
+    }
+
+    .date-input-group label {
+      display: block;
+      font-size: 12px;
+      color: #5f6368;
+      margin-bottom: 4px;
+    }
+
+    input[type="date"] {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #dadce0;
+      border-radius: 4px;
+      font-size: 13px;
+      box-sizing: border-box;
+    }
+
+    .checkbox-group {
+      margin-top: 12px;
+    }
+
+    .checkbox-item {
+      display: flex;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .checkbox-item input[type="checkbox"] {
+      margin-right: 8px;
+      width: 16px;
+      height: 16px;
+      cursor: pointer;
+    }
+
+    .checkbox-item label {
+      font-size: 13px;
+      color: #202124;
+      cursor: pointer;
+    }
+
+    .update-btn {
+      width: 100%;
+      padding: 12px;
+      background: #1a73e8;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .update-btn:hover {
+      background: #1557b0;
+    }
+
+    .update-btn:disabled {
+      background: #dadce0;
+      cursor: not-allowed;
+    }
+
+    .status {
+      margin-top: 12px;
+      padding: 8px 12px;
+      border-radius: 4px;
+      font-size: 12px;
+      display: none;
+    }
+
+    .status.info {
+      background: #e8f0fe;
+      color: #1967d2;
+      display: block;
+    }
+
+    .status.success {
+      background: #e6f4ea;
+      color: #137333;
+      display: block;
+    }
+
+    .status.error {
+      background: #fce8e6;
+      color: #c5221f;
+      display: block;
+    }
+
+    .sheet-selector {
+      margin-bottom: 12px;
+    }
+
+    .sheet-selector label {
+      display: block;
+      font-size: 12px;
+      color: #5f6368;
+      margin-bottom: 4px;
+    }
+
+    .sheet-selector select {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #dadce0;
+      border-radius: 4px;
+      font-size: 13px;
+      box-sizing: border-box;
+      background: white;
+    }
+
+    .long-period-note {
+      font-size: 11px;
+      color: #5f6368;
+      margin-top: 8px;
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+  <h2>グラフ日付範囲設定</h2>
+
+  <div class="section">
+    <div class="section-title">対象シート</div>
+    <div class="sheet-selector">
+      <label>グラフを更新するシート</label>
+      <select id="sheetSelect">
+        <option value="">読み込み中...</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">期間を選択</div>
+    <div class="period-buttons">
+      <button class="period-btn active" data-days="2">2日間</button>
+      <button class="period-btn" data-days="7">7日間</button>
+      <button class="period-btn" data-days="30">1ヶ月</button>
+      <button class="period-btn" data-days="180">6ヶ月</button>
+      <button class="period-btn" data-days="365">1年間</button>
+      <button class="period-btn" data-days="custom">カスタム</button>
+    </div>
+
+    <div class="custom-date" id="customDateInputs" style="display: none;">
+      <div class="date-input-group">
+        <label>開始日</label>
+        <input type="date" id="startDate">
+      </div>
+      <div class="date-input-group">
+        <label>終了日</label>
+        <input type="date" id="endDate">
+      </div>
+    </div>
+  </div>
+
+  <div class="section" id="longPeriodOptions" style="display: none;">
+    <div class="section-title">表示データ（1ヶ月以上の期間）</div>
+    <div class="long-period-note">
+      ※ 1ヶ月以上の期間では日次の最高・最低値を表示します
+    </div>
+    <div class="checkbox-group">
+      <div class="checkbox-item">
+        <input type="checkbox" id="showIndoorTemp" checked>
+        <label for="showIndoorTemp">室内温度（最高・最低）</label>
+      </div>
+      <div class="checkbox-item">
+        <input type="checkbox" id="showHumidity" checked>
+        <label for="showHumidity">湿度（最高・最低）</label>
+      </div>
+      <div class="checkbox-item">
+        <input type="checkbox" id="showOutdoorTemp" checked>
+        <label for="showOutdoorTemp">外気温（最高・最低）</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <button class="update-btn" id="updateBtn" onclick="updateChart()">
+      グラフを更新
+    </button>
+    <div id="status" class="status"></div>
+  </div>
+
+  <script>
+    let selectedDays = 2;
+    let isCustomMode = false;
+
+    // 初期化
+    document.addEventListener('DOMContentLoaded', function() {
+      loadSheetConfigs();
+      initializePeriodButtons();
+      initializeCustomDates();
+      checkLongPeriodOptions();
+    });
+
+    // シート設定を読み込み
+    function loadSheetConfigs() {
+      google.script.run
+        .withSuccessHandler(function(configs) {
+          const select = document.getElementById('sheetSelect');
+          select.innerHTML = '';
+          configs.forEach(function(config, index) {
+            const option = document.createElement('option');
+            option.value = index;
+            option.textContent = config.dataSheetName;
+            select.appendChild(option);
+          });
+        })
+        .withFailureHandler(function(error) {
+          showStatus('error', 'シート設定の読み込みに失敗: ' + error);
+        })
+        .getSheetConfigsForUI();
+    }
+
+    // 期間ボタンの初期化
+    function initializePeriodButtons() {
+      const buttons = document.querySelectorAll('.period-btn');
+      buttons.forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          buttons.forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+
+          const days = btn.getAttribute('data-days');
+          if (days === 'custom') {
+            isCustomMode = true;
+            document.getElementById('customDateInputs').style.display = 'block';
+          } else {
+            isCustomMode = false;
+            selectedDays = parseInt(days);
+            document.getElementById('customDateInputs').style.display = 'none';
+          }
+          checkLongPeriodOptions();
+        });
+      });
+    }
+
+    // カスタム日付の初期化
+    function initializeCustomDates() {
+      const today = new Date();
+      const endDate = formatDate(today);
+      const startDate = formatDate(new Date(today.getTime() - 2 * 24 * 60 * 60 * 1000));
+
+      document.getElementById('endDate').value = endDate;
+      document.getElementById('startDate').value = startDate;
+
+      // 日付変更時のイベント
+      document.getElementById('startDate').addEventListener('change', checkLongPeriodOptions);
+      document.getElementById('endDate').addEventListener('change', checkLongPeriodOptions);
+    }
+
+    // 長期間オプションの表示/非表示チェック
+    function checkLongPeriodOptions() {
+      let days = selectedDays;
+
+      if (isCustomMode) {
+        const startDate = new Date(document.getElementById('startDate').value);
+        const endDate = new Date(document.getElementById('endDate').value);
+        days = Math.floor((endDate - startDate) / (1000 * 60 * 60 * 24));
+      }
+
+      const longPeriodOptions = document.getElementById('longPeriodOptions');
+      if (days >= 30) {
+        longPeriodOptions.style.display = 'block';
+      } else {
+        longPeriodOptions.style.display = 'none';
+      }
+    }
+
+    // 日付フォーマット
+    function formatDate(date) {
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      return year + '-' + month + '-' + day;
+    }
+
+    // グラフ更新
+    function updateChart() {
+      const sheetIndex = parseInt(document.getElementById('sheetSelect').value);
+      if (isNaN(sheetIndex)) {
+        showStatus('error', 'シートを選択してください');
+        return;
+      }
+
+      let startDate, endDate;
+
+      if (isCustomMode) {
+        startDate = document.getElementById('startDate').value;
+        endDate = document.getElementById('endDate').value;
+
+        if (!startDate || !endDate) {
+          showStatus('error', '開始日と終了日を両方入力してください');
+          return;
+        }
+
+        if (new Date(startDate) > new Date(endDate)) {
+          showStatus('error', '開始日は終了日より前である必要があります');
+          return;
+        }
+      } else {
+        const end = new Date();
+        endDate = formatDate(end);
+        const start = new Date(end.getTime() - selectedDays * 24 * 60 * 60 * 1000);
+        startDate = formatDate(start);
+      }
+
+      // 表示オプション
+      const options = {
+        showIndoorTemp: document.getElementById('showIndoorTemp').checked,
+        showHumidity: document.getElementById('showHumidity').checked,
+        showOutdoorTemp: document.getElementById('showOutdoorTemp').checked
+      };
+
+      showStatus('info', 'グラフを更新中...');
+      document.getElementById('updateBtn').disabled = true;
+
+      google.script.run
+        .withSuccessHandler(function(result) {
+          showStatus('success', 'グラフを更新しました');
+          document.getElementById('updateBtn').disabled = false;
+        })
+        .withFailureHandler(function(error) {
+          showStatus('error', 'エラー: ' + error);
+          document.getElementById('updateBtn').disabled = false;
+        })
+        .updateChartWithDateRange(sheetIndex, startDate, endDate, options);
+    }
+
+    // ステータス表示
+    function showStatus(type, message) {
+      const status = document.getElementById('status');
+      status.className = 'status ' + type;
+      status.textContent = message;
+    }
+  </script>
+</body>
+</html>

@@ -45,6 +45,28 @@ interface DataGapInfo {
 }
 
 /**
+ * グラフ表示オプションの型定義
+ */
+interface ChartDisplayOptions {
+  showIndoorTemp: boolean;
+  showHumidity: boolean;
+  showOutdoorTemp: boolean;
+}
+
+/**
+ * 日次集計データの型定義
+ */
+interface DailyData {
+  date: Date;
+  indoorTempMax?: number;
+  indoorTempMin?: number;
+  humidityMax?: number;
+  humidityMin?: number;
+  outdoorTempMax?: number | null;
+  outdoorTempMin?: number | null;
+}
+
+/**
  * スクリプトプロパティから設定値を取得するヘルパー関数
  * GitHubに機密情報をコミットしないため、PropertiesServiceを使用
  */
@@ -274,10 +296,10 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
       timestamps.push(timestamp);
     }
 
-    // 外気温データを取得
+    // 外気温データを取得（スプレッドシートキャッシュ優先）
     Logger.log('外気温データを取得中...');
     const stationId = getAmedasStationId(config.postalCode);
-    const outdoorTempData = getTemperatureHistory(stationId, timestamps);
+    const outdoorTempData = getOutdoorTemperatureWithCache(stationId, timestamps);
     const outdoorTemperatures: number[] = [];
 
     // 外気温をdataRowsに追加
@@ -777,4 +799,764 @@ function getAmedasStationId(postalCode: string): string {
   }
 
   return stationId;
+}
+
+// ========================================
+// 外気温データのスプレッドシート保存機能
+// ========================================
+
+/**
+ * 外気温データ保存用シートの名前
+ */
+const OUTDOOR_TEMP_SHEET_NAME = '外気温データ';
+
+/**
+ * 外気温データ保存用シートを取得または作成
+ */
+function getOrCreateOutdoorTempSheet(): GoogleAppsScript.Spreadsheet.Sheet {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = spreadsheet.getSheetByName(OUTDOOR_TEMP_SHEET_NAME);
+
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(OUTDOOR_TEMP_SHEET_NAME);
+    // ヘッダー行を追加
+    sheet.getRange(1, 1, 1, 3).setValues([['タイムスタンプ', '観測所ID', '気温']]);
+    sheet.getRange(1, 1, 1, 3).setFontWeight('bold');
+    Logger.log(`外気温データ保存用シート "${OUTDOOR_TEMP_SHEET_NAME}" を作成しました`);
+  }
+
+  return sheet;
+}
+
+/**
+ * 外気温データをスプレッドシートに保存
+ * @param stationId 観測所ID
+ * @param data 気温データの配列
+ */
+function saveOutdoorTemperatureData(stationId: string, data: TemperatureData[]): void {
+  const sheet = getOrCreateOutdoorTempSheet();
+  const rows: any[][] = [];
+
+  for (const item of data) {
+    if (item.temperature !== null) {
+      rows.push([item.timestamp, stationId, item.temperature]);
+    }
+  }
+
+  if (rows.length > 0) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, 3).setValues(rows);
+    Logger.log(`外気温データを${rows.length}件保存しました`);
+  }
+}
+
+/**
+ * スプレッドシートから外気温データを読み込み
+ * @param stationId 観測所ID
+ * @param startDate 開始日時
+ * @param endDate 終了日時
+ * @returns タイムスタンプをキーとした気温のマップ
+ */
+function loadOutdoorTemperatureData(
+  stationId: string,
+  startDate: Date,
+  endDate: Date
+): Map<number, number> {
+  const sheet = getOrCreateOutdoorTempSheet();
+  const allData = sheet.getDataRange().getValues();
+  const dataMap = new Map<number, number>();
+
+  // ヘッダー行をスキップして、指定期間のデータを読み込む
+  for (let i = 1; i < allData.length; i++) {
+    const row = allData[i];
+    const timestamp = new Date(row[0]);
+    const rowStationId = row[1];
+    const temperature = Number(row[2]);
+
+    if (rowStationId === stationId &&
+        timestamp >= startDate &&
+        timestamp <= endDate) {
+      // タイムスタンプを正時に丸めてキーにする
+      const roundedTime = new Date(timestamp);
+      roundedTime.setMinutes(0, 0, 0);
+      dataMap.set(roundedTime.getTime(), temperature);
+    }
+  }
+
+  Logger.log(`スプレッドシートから外気温データを${dataMap.size}件読み込みました`);
+  return dataMap;
+}
+
+/**
+ * 外気温データを取得（スプレッドシートキャッシュ優先）
+ * @param stationId 観測所ID
+ * @param timestamps タイムスタンプの配列
+ * @returns 気温データの配列
+ */
+function getOutdoorTemperatureWithCache(
+  stationId: string,
+  timestamps: Date[]
+): TemperatureData[] {
+  if (timestamps.length === 0) {
+    return [];
+  }
+
+  const startDate = new Date(Math.min(...timestamps.map(t => t.getTime())));
+  const endDate = new Date(Math.max(...timestamps.map(t => t.getTime())));
+
+  // スプレッドシートから既存データを読み込み
+  const cachedData = loadOutdoorTemperatureData(stationId, startDate, endDate);
+
+  // 直近2日の範囲を計算
+  const twoDaysAgo = new Date();
+  twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
+
+  const results: TemperatureData[] = [];
+  const missingData: Date[] = [];
+
+  for (const timestamp of timestamps) {
+    const roundedTime = new Date(timestamp);
+    roundedTime.setMinutes(0, 0, 0);
+    const timeKey = roundedTime.getTime();
+
+    if (cachedData.has(timeKey)) {
+      // キャッシュにある場合
+      results.push({
+        timestamp: timestamp,
+        temperature: cachedData.get(timeKey)!
+      });
+    } else if (timestamp >= twoDaysAgo) {
+      // 直近2日でキャッシュにない場合は、後でAPIから取得
+      missingData.push(timestamp);
+      results.push({
+        timestamp: timestamp,
+        temperature: null
+      });
+    } else {
+      // 2日より前でキャッシュにない場合は、データなし
+      results.push({
+        timestamp: timestamp,
+        temperature: null
+      });
+    }
+  }
+
+  // 欠けているデータをAPIから取得
+  if (missingData.length > 0) {
+    Logger.log(`外気温データの欠損を検出: ${missingData.length}件をAPIから取得します`);
+    const fetchedData = getTemperatureHistory(stationId, missingData);
+
+    // 取得したデータをスプレッドシートに保存
+    saveOutdoorTemperatureData(stationId, fetchedData);
+
+    // 結果に反映
+    for (let i = 0; i < fetchedData.length; i++) {
+      const fetchedItem = fetchedData[i];
+      // resultsから対応するタイムスタンプを見つけて更新
+      const resultIndex = results.findIndex(r =>
+        r.timestamp.getTime() === fetchedItem.timestamp.getTime()
+      );
+      if (resultIndex >= 0) {
+        results[resultIndex].temperature = fetchedItem.temperature;
+      }
+    }
+  }
+
+  return results;
+}
+
+// ========================================
+// 日付範囲指定グラフ機能
+// ========================================
+
+/**
+ * サイドバーを表示
+ * スプレッドシートのメニューから実行する
+ */
+function showSidebar(): void {
+  const html = HtmlService.createHtmlOutputFromFile('sidebar')
+    .setTitle('グラフ日付範囲設定')
+    .setWidth(320);
+  SpreadsheetApp.getUi().showSidebar(html);
+}
+
+/**
+ * UI用にシート設定を取得
+ * サイドバーから呼び出される
+ */
+function getSheetConfigsForUI(): SheetConfig[] {
+  return getSheetConfigs();
+}
+
+/**
+ * カスタムメニューを追加
+ * スプレッドシートを開いたときに自動実行される
+ */
+function onOpen(): void {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('温度・湿度グラフ')
+    .addItem('グラフ設定を開く', 'showSidebar')
+    .addItem('全グラフを更新', 'updateAllCharts')
+    .addToUi();
+}
+
+/**
+ * 日付範囲を指定してグラフを更新
+ * サイドバーから呼び出される
+ * @param sheetIndex シート設定のインデックス
+ * @param startDateStr 開始日（YYYY-MM-DD形式）
+ * @param endDateStr 終了日（YYYY-MM-DD形式）
+ * @param options 表示オプション
+ */
+function updateChartWithDateRange(
+  sheetIndex: number,
+  startDateStr: string,
+  endDateStr: string,
+  options: ChartDisplayOptions
+): void {
+  try {
+    const configs = getSheetConfigs();
+    if (sheetIndex < 0 || sheetIndex >= configs.length) {
+      throw new Error('無効なシートインデックス');
+    }
+
+    const config = configs[sheetIndex];
+    const startDate = new Date(startDateStr);
+    const endDate = new Date(endDateStr);
+
+    // 終了日を23:59:59に設定して、その日のデータも含める
+    endDate.setHours(23, 59, 59, 999);
+
+    Logger.log(`グラフ更新: ${config.dataSheetName}, 期間: ${startDateStr} ～ ${endDateStr}`);
+
+    const daysDiff = Math.floor((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
+
+    if (daysDiff >= 30) {
+      // 1ヶ月以上の場合は日次集計グラフを作成
+      updateLongPeriodChart(config, startDate, endDate, options);
+    } else {
+      // 短期間の場合は時系列グラフを作成
+      updateShortPeriodChart(config, startDate, endDate);
+    }
+
+    Logger.log('グラフ更新完了');
+  } catch (error) {
+    Logger.log(`エラー: ${error}`);
+    throw error;
+  }
+}
+
+/**
+ * 短期間（30日未満）のグラフを更新
+ * 既存のupdateSingleChart関数をベースに、日付範囲を指定できるようにしたもの
+ */
+function updateShortPeriodChart(
+  config: SheetConfig,
+  startDate: Date,
+  endDate: Date
+): void {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const dataSheet = spreadsheet.getSheetByName(config.dataSheetName);
+
+  if (!dataSheet) {
+    throw new Error(`データシート "${config.dataSheetName}" が見つかりません`);
+  }
+
+  const allData = dataSheet.getDataRange().getValues();
+  const headers = allData[0];
+
+  // タイムスタンプ、温度、湿度の列インデックスを取得
+  const timestampColIndex = 0;
+  const tempColIndex = findColumnIndex(headers, '温度');
+  const humidityColIndex = findColumnIndex(headers, '湿度');
+
+  if (tempColIndex === -1 || humidityColIndex === -1) {
+    throw new Error('温度または湿度の列が見つかりません');
+  }
+
+  // 指定期間のデータをフィルタリング
+  const periodData = allData.filter((row, index) => {
+    if (index === 0) return true; // ヘッダー行は保持
+    const timestamp = new Date(row[timestampColIndex]);
+    return timestamp >= startDate && timestamp <= endDate;
+  });
+
+  if (periodData.length <= 1) {
+    throw new Error('指定期間のデータが見つかりません');
+  }
+
+  // グラフシートを取得または作成
+  let chartSheet = spreadsheet.getSheetByName(config.chartSheetName);
+  if (!chartSheet) {
+    chartSheet = spreadsheet.insertSheet(config.chartSheetName);
+  }
+
+  // 既存のグラフとデータを削除
+  const charts = chartSheet.getCharts();
+  charts.forEach(chart => chartSheet.removeChart(chart));
+  chartSheet.clear();
+
+  // グラフ用のデータを作成
+  const chartData: any[][] = [];
+  chartData.push(['時刻', '室内温度 (℃)', '湿度 (%)', '外気温 (℃)']);
+
+  const indoorTemperatures: number[] = [];
+  const humidities: number[] = [];
+  const dataRows: any[][] = [];
+  const timestamps: Date[] = [];
+
+  for (let i = 1; i < periodData.length; i++) {
+    const row = periodData[i];
+    const temp = Number(row[tempColIndex]);
+    const humidity = Number(row[humidityColIndex]);
+    const timestamp = new Date(row[timestampColIndex]);
+
+    dataRows.push([timestamp, temp, humidity]);
+    indoorTemperatures.push(temp);
+    humidities.push(humidity);
+    timestamps.push(timestamp);
+  }
+
+  // 外気温データを取得（スプレッドシートキャッシュ優先）
+  Logger.log('外気温データを取得中...');
+  const stationId = getAmedasStationId(config.postalCode);
+  const outdoorTempData = getOutdoorTemperatureWithCache(stationId, timestamps);
+  const outdoorTemperatures: number[] = [];
+
+  for (let i = 0; i < dataRows.length; i++) {
+    const outdoorTemp = outdoorTempData[i].temperature;
+    outdoorTemperatures.push(outdoorTemp !== null ? outdoorTemp : NaN);
+  }
+
+  // 温度・湿度の範囲を計算
+  const validOutdoorTemps = outdoorTemperatures.filter(t => !isNaN(t));
+  const allTemperatures = [...indoorTemperatures, ...validOutdoorTemps];
+  const tempMin = Math.min(...allTemperatures);
+  const tempMax = Math.max(...allTemperatures);
+  const tempRange = tempMax - tempMin;
+  const tempMargin = Math.max(tempRange * 0.1, 1);
+  const tempViewMin = Math.floor(tempMin - tempMargin);
+  const tempViewMax = Math.ceil(tempMax + tempMargin);
+
+  const humidityMin = Math.min(...humidities);
+  const humidityMax = Math.max(...humidities);
+  const humidityRange = humidityMax - humidityMin;
+  const humidityMargin = Math.max(humidityRange * 0.1, 2);
+  const humidityViewMin = Math.floor(humidityMin - humidityMargin);
+  const humidityViewMax = Math.ceil(humidityMax + humidityMargin);
+
+  // 最小値・最大値のインデックスを見つける
+  const indoorTempMin = Math.min(...indoorTemperatures);
+  const indoorTempMax = Math.max(...indoorTemperatures);
+  const indoorTempMinIndex = indoorTemperatures.indexOf(indoorTempMin);
+  const indoorTempMaxIndex = indoorTemperatures.indexOf(indoorTempMax);
+  const humidityMinIndex = humidities.indexOf(humidityMin);
+  const humidityMaxIndex = humidities.indexOf(humidityMax);
+
+  const outdoorTempMin = validOutdoorTemps.length > 0 ? Math.min(...validOutdoorTemps) : null;
+  const outdoorTempMax = validOutdoorTemps.length > 0 ? Math.max(...validOutdoorTemps) : null;
+  let outdoorTempMinIndex = -1;
+  let outdoorTempMaxIndex = -1;
+  if (outdoorTempMin !== null) {
+    outdoorTempMinIndex = outdoorTemperatures.indexOf(outdoorTempMin);
+  }
+  if (outdoorTempMax !== null) {
+    outdoorTempMaxIndex = outdoorTemperatures.indexOf(outdoorTempMax);
+  }
+
+  // データ行を追加
+  for (let i = 0; i < dataRows.length; i++) {
+    const [timestamp, indoorTemp, humidity] = dataRows[i];
+    const outdoorTemp = outdoorTemperatures[i];
+    chartData.push([timestamp, indoorTemp, humidity, isNaN(outdoorTemp) ? null : outdoorTemp]);
+  }
+
+  // サブタイトルを作成
+  const indoorTempMinTime = Utilities.formatDate(timestamps[indoorTempMinIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
+  const indoorTempMaxTime = Utilities.formatDate(timestamps[indoorTempMaxIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
+  const humidityMinTime = Utilities.formatDate(timestamps[humidityMinIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
+  const humidityMaxTime = Utilities.formatDate(timestamps[humidityMaxIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
+
+  const daysDiff = Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
+  let subtitle = `室内: 最低 ${indoorTempMin}℃ (${indoorTempMinTime}) / 最高 ${indoorTempMax}℃ (${indoorTempMaxTime})   湿度: 最低 ${humidityMin}% (${humidityMinTime}) / 最高 ${humidityMax}% (${humidityMaxTime})`;
+
+  if (outdoorTempMin !== null && outdoorTempMax !== null && outdoorTempMinIndex >= 0 && outdoorTempMaxIndex >= 0) {
+    const outdoorTempMinTime = Utilities.formatDate(timestamps[outdoorTempMinIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
+    const outdoorTempMaxTime = Utilities.formatDate(timestamps[outdoorTempMaxIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
+    subtitle += `   外気: 最低 ${outdoorTempMin}℃ (${outdoorTempMinTime}) / 最高 ${outdoorTempMax}℃ (${outdoorTempMaxTime})`;
+  }
+
+  // データをチャートシートに書き込み
+  const dataRange = chartSheet.getRange(1, 1, chartData.length, 4);
+  dataRange.setValues(chartData);
+
+  // タイムスタンプ列のフォーマット設定
+  chartSheet.getRange(2, 1, chartData.length - 1, 1).setNumberFormat('m/d hh:mm');
+
+  // データ列を非表示
+  chartSheet.hideColumns(1, 4);
+
+  // グラフを作成
+  const chartTitle = `温度・湿度の推移（${daysDiff}日間）- ${config.dataSheetName}`;
+  const chart = chartSheet.newChart()
+    .setChartType(Charts.ChartType.LINE)
+    .addRange(chartSheet.getRange(1, 1, chartData.length, 4))
+    .setPosition(1, 1, 0, 0)
+    .setOption('title', chartTitle)
+    .setOption('subtitle', subtitle)
+    .setOption('width', 1000)
+    .setOption('height', 500)
+    .setOption('hAxis', {
+      title: '時刻',
+      format: 'M/d HH:mm',
+      slantedText: true,
+      slantedTextAngle: 45,
+      minorGridlines: { count: 5 }
+    })
+    .setOption('series', {
+      0: {
+        targetAxisIndex: 0,
+        color: '#FF6B6B',
+        lineWidth: 2,
+        pointSize: 5,
+        labelInLegend: '室内温度'
+      },
+      1: {
+        targetAxisIndex: 1,
+        color: '#4ECDC4',
+        lineWidth: 2,
+        pointSize: 5,
+        labelInLegend: '湿度'
+      },
+      2: {
+        targetAxisIndex: 0,
+        color: '#FFA500',
+        lineWidth: 2,
+        pointSize: 5,
+        labelInLegend: '外気温'
+      }
+    })
+    .setOption('vAxes', {
+      0: {
+        title: '温度 (℃)',
+        viewWindow: { min: tempViewMin, max: tempViewMax },
+        minorGridlines: { count: 4 }
+      },
+      1: {
+        title: '湿度 (%)',
+        viewWindow: { min: humidityViewMin, max: humidityViewMax },
+        minorGridlines: { count: 4 }
+      }
+    })
+    .setOption('curveType', 'function')
+    .setOption('legend', { position: 'bottom' })
+    .build();
+
+  chartSheet.insertChart(chart);
+  Logger.log(`${config.dataSheetName}: グラフを更新しました（データ件数: ${periodData.length - 1}件）`);
+}
+
+/**
+ * 長期間（30日以上）のグラフを更新
+ * 日次の最高・最低値を表示
+ */
+function updateLongPeriodChart(
+  config: SheetConfig,
+  startDate: Date,
+  endDate: Date,
+  options: ChartDisplayOptions
+): void {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const dataSheet = spreadsheet.getSheetByName(config.dataSheetName);
+
+  if (!dataSheet) {
+    throw new Error(`データシート "${config.dataSheetName}" が見つかりません`);
+  }
+
+  const allData = dataSheet.getDataRange().getValues();
+  const headers = allData[0];
+
+  // タイムスタンプ、温度、湿度の列インデックスを取得
+  const timestampColIndex = 0;
+  const tempColIndex = findColumnIndex(headers, '温度');
+  const humidityColIndex = findColumnIndex(headers, '湿度');
+
+  if (tempColIndex === -1 || humidityColIndex === -1) {
+    throw new Error('温度または湿度の列が見つかりません');
+  }
+
+  // 指定期間のデータをフィルタリング
+  const periodData = allData.filter((row, index) => {
+    if (index === 0) return false; // ヘッダー行は除外
+    const timestamp = new Date(row[timestampColIndex]);
+    return timestamp >= startDate && timestamp <= endDate;
+  });
+
+  if (periodData.length === 0) {
+    throw new Error('指定期間のデータが見つかりません');
+  }
+
+  // 日次でデータを集計
+  const dailyDataMap = new Map<string, DailyData>();
+
+  for (const row of periodData) {
+    const timestamp = new Date(row[timestampColIndex]);
+    const dateKey = Utilities.formatDate(timestamp, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    const temp = Number(row[tempColIndex]);
+    const humidity = Number(row[humidityColIndex]);
+
+    if (!dailyDataMap.has(dateKey)) {
+      dailyDataMap.set(dateKey, {
+        date: new Date(dateKey),
+        indoorTempMax: temp,
+        indoorTempMin: temp,
+        humidityMax: humidity,
+        humidityMin: humidity
+      });
+    } else {
+      const data = dailyDataMap.get(dateKey)!;
+      if (temp > data.indoorTempMax!) data.indoorTempMax = temp;
+      if (temp < data.indoorTempMin!) data.indoorTempMin = temp;
+      if (humidity > data.humidityMax!) data.humidityMax = humidity;
+      if (humidity < data.humidityMin!) data.humidityMin = humidity;
+    }
+  }
+
+  // 日付順にソート
+  const dailyDataArray = Array.from(dailyDataMap.values()).sort((a, b) =>
+    a.date.getTime() - b.date.getTime()
+  );
+
+  // 外気温の日次最高・最低を取得
+  if (options.showOutdoorTemp) {
+    Logger.log('外気温の日次データを取得中...');
+    const stationId = getAmedasStationId(config.postalCode);
+
+    for (const dailyData of dailyDataArray) {
+      const { max, min } = getDailyOutdoorTemperature(stationId, dailyData.date);
+      dailyData.outdoorTempMax = max;
+      dailyData.outdoorTempMin = min;
+    }
+  }
+
+  // グラフシートを取得または作成
+  let chartSheet = spreadsheet.getSheetByName(config.chartSheetName);
+  if (!chartSheet) {
+    chartSheet = spreadsheet.insertSheet(config.chartSheetName);
+  }
+
+  // 既存のグラフとデータを削除
+  const charts = chartSheet.getCharts();
+  charts.forEach(chart => chartSheet.removeChart(chart));
+  chartSheet.clear();
+
+  // グラフ用のヘッダーを作成
+  const headers_chart = ['日付'];
+  const seriesConfig: any = {};
+  let seriesIndex = 0;
+  let primaryAxisCount = 0;
+  let secondaryAxisCount = 0;
+
+  if (options.showIndoorTemp) {
+    headers_chart.push('室内温度（最高）', '室内温度（最低）');
+    seriesConfig[seriesIndex++] = {
+      targetAxisIndex: 0,
+      color: '#FF6B6B',
+      lineWidth: 2,
+      pointSize: 4,
+      labelInLegend: '室内温度（最高）'
+    };
+    seriesConfig[seriesIndex++] = {
+      targetAxisIndex: 0,
+      color: '#FF9999',
+      lineWidth: 2,
+      pointSize: 4,
+      labelInLegend: '室内温度（最低）'
+    };
+    primaryAxisCount += 2;
+  }
+
+  if (options.showHumidity) {
+    headers_chart.push('湿度（最高）', '湿度（最低）');
+    seriesConfig[seriesIndex++] = {
+      targetAxisIndex: 1,
+      color: '#4ECDC4',
+      lineWidth: 2,
+      pointSize: 4,
+      labelInLegend: '湿度（最高）'
+    };
+    seriesConfig[seriesIndex++] = {
+      targetAxisIndex: 1,
+      color: '#7FE5DE',
+      lineWidth: 2,
+      pointSize: 4,
+      labelInLegend: '湿度（最低）'
+    };
+    secondaryAxisCount += 2;
+  }
+
+  if (options.showOutdoorTemp) {
+    headers_chart.push('外気温（最高）', '外気温（最低）');
+    seriesConfig[seriesIndex++] = {
+      targetAxisIndex: 0,
+      color: '#FFA500',
+      lineWidth: 2,
+      pointSize: 4,
+      labelInLegend: '外気温（最高）'
+    };
+    seriesConfig[seriesIndex++] = {
+      targetAxisIndex: 0,
+      color: '#FFD27F',
+      lineWidth: 2,
+      pointSize: 4,
+      labelInLegend: '外気温（最低）'
+    };
+    primaryAxisCount += 2;
+  }
+
+  // データ行を作成
+  const chartData: any[][] = [headers_chart];
+
+  for (const dailyData of dailyDataArray) {
+    const row: any[] = [dailyData.date];
+
+    if (options.showIndoorTemp) {
+      row.push(dailyData.indoorTempMax, dailyData.indoorTempMin);
+    }
+    if (options.showHumidity) {
+      row.push(dailyData.humidityMax, dailyData.humidityMin);
+    }
+    if (options.showOutdoorTemp) {
+      row.push(dailyData.outdoorTempMax, dailyData.outdoorTempMin);
+    }
+
+    chartData.push(row);
+  }
+
+  // データをチャートシートに書き込み
+  const dataRange = chartSheet.getRange(1, 1, chartData.length, headers_chart.length);
+  dataRange.setValues(chartData);
+
+  // 日付列のフォーマット設定
+  chartSheet.getRange(2, 1, chartData.length - 1, 1).setNumberFormat('yyyy/mm/dd');
+
+  // データ列を非表示
+  chartSheet.hideColumns(1, headers_chart.length);
+
+  // Y軸の範囲を計算
+  const vAxesConfig: any = {};
+
+  if (primaryAxisCount > 0) {
+    // 温度軸の範囲を計算
+    const allTemps: number[] = [];
+    for (const dailyData of dailyDataArray) {
+      if (options.showIndoorTemp && dailyData.indoorTempMax !== undefined && dailyData.indoorTempMin !== undefined) {
+        allTemps.push(dailyData.indoorTempMax, dailyData.indoorTempMin);
+      }
+      if (options.showOutdoorTemp &&
+          dailyData.outdoorTempMax !== undefined && dailyData.outdoorTempMax !== null &&
+          dailyData.outdoorTempMin !== undefined && dailyData.outdoorTempMin !== null) {
+        allTemps.push(dailyData.outdoorTempMax, dailyData.outdoorTempMin);
+      }
+    }
+
+    if (allTemps.length > 0) {
+      const tempMin = Math.min(...allTemps);
+      const tempMax = Math.max(...allTemps);
+      const tempRange = tempMax - tempMin;
+      const tempMargin = Math.max(tempRange * 0.1, 1);
+
+      vAxesConfig[0] = {
+        title: '温度 (℃)',
+        viewWindow: {
+          min: Math.floor(tempMin - tempMargin),
+          max: Math.ceil(tempMax + tempMargin)
+        },
+        minorGridlines: { count: 4 }
+      };
+    }
+  }
+
+  if (secondaryAxisCount > 0) {
+    // 湿度軸の範囲を計算
+    const allHumidities: number[] = [];
+    for (const dailyData of dailyDataArray) {
+      if (options.showHumidity && dailyData.humidityMax !== undefined && dailyData.humidityMin !== undefined) {
+        allHumidities.push(dailyData.humidityMax, dailyData.humidityMin);
+      }
+    }
+
+    if (allHumidities.length > 0) {
+      const humidityMin = Math.min(...allHumidities);
+      const humidityMax = Math.max(...allHumidities);
+      const humidityRange = humidityMax - humidityMin;
+      const humidityMargin = Math.max(humidityRange * 0.1, 2);
+
+      vAxesConfig[1] = {
+        title: '湿度 (%)',
+        viewWindow: {
+          min: Math.floor(humidityMin - humidityMargin),
+          max: Math.ceil(humidityMax + humidityMargin)
+        },
+        minorGridlines: { count: 4 }
+      };
+    }
+  }
+
+  // グラフを作成
+  const daysDiff = Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
+  const chartTitle = `温度・湿度の推移（日次、${daysDiff}日間）- ${config.dataSheetName}`;
+
+  const chartBuilder = chartSheet.newChart()
+    .setChartType(Charts.ChartType.LINE)
+    .addRange(chartSheet.getRange(1, 1, chartData.length, headers_chart.length))
+    .setPosition(1, 1, 0, 0)
+    .setOption('title', chartTitle)
+    .setOption('width', 1000)
+    .setOption('height', 500)
+    .setOption('hAxis', {
+      title: '日付',
+      format: 'yyyy/MM/dd',
+      slantedText: true,
+      slantedTextAngle: 45
+    })
+    .setOption('series', seriesConfig)
+    .setOption('vAxes', vAxesConfig)
+    .setOption('curveType', 'function')
+    .setOption('legend', { position: 'bottom' });
+
+  chartSheet.insertChart(chartBuilder.build());
+  Logger.log(`${config.dataSheetName}: 日次グラフを更新しました（データ日数: ${dailyDataArray.length}日）`);
+}
+
+/**
+ * 指定日の外気温の最高・最低を取得
+ * スプレッドシートキャッシュを優先的に使用
+ */
+function getDailyOutdoorTemperature(stationId: string, date: Date): { max: number | null, min: number | null } {
+  // その日の0時から23時までのタイムスタンプを作成
+  const timestamps: Date[] = [];
+  for (let hour = 0; hour < 24; hour++) {
+    const datetime = new Date(date);
+    datetime.setHours(hour, 0, 0, 0);
+    timestamps.push(datetime);
+  }
+
+  // スプレッドシートキャッシュ優先で外気温データを取得
+  const tempData = getOutdoorTemperatureWithCache(stationId, timestamps);
+  const temps: number[] = [];
+
+  for (const item of tempData) {
+    if (item.temperature !== null) {
+      temps.push(item.temperature);
+    }
+  }
+
+  if (temps.length === 0) {
+    return { max: null, min: null };
+  }
+
+  return {
+    max: Math.max(...temps),
+    min: Math.min(...temps)
+  };
 }
