@@ -842,7 +842,9 @@ function saveOutdoorTemperatureData(stationId: string, data: TemperatureData[]):
 
   if (rows.length > 0) {
     sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, 3).setValues(rows);
-    Logger.log(`外気温データを${rows.length}件保存しました`);
+    Logger.log(`外気温データを${rows.length}件保存しました（観測所ID: ${stationId}）`);
+  } else {
+    Logger.log(`保存する外気温データがありません（観測所ID: ${stationId}）`);
   }
 }
 
@@ -862,11 +864,23 @@ function loadOutdoorTemperatureData(
   const allData = sheet.getDataRange().getValues();
   const dataMap = new Map<number, number>();
 
+  Logger.log(`外気温データシートの総行数: ${allData.length}行（ヘッダー含む）`);
+  Logger.log(`検索条件: 観測所ID=${stationId}, 期間=${Utilities.formatDate(startDate, Session.getScriptTimeZone(), 'yyyy/MM/dd')} ～ ${Utilities.formatDate(endDate, Session.getScriptTimeZone(), 'yyyy/MM/dd')}`);
+
+  // デバッグ: 最初の数行を出力
+  if (allData.length > 1) {
+    Logger.log(`シートの最初の数行（デバッグ用）:`);
+    for (let i = 1; i < Math.min(4, allData.length); i++) {
+      const row = allData[i];
+      Logger.log(`  行${i}: タイムスタンプ=${row[0]}, 観測所ID='${row[1]}', 気温=${row[2]}`);
+    }
+  }
+
   // ヘッダー行をスキップして、指定期間のデータを読み込む
   for (let i = 1; i < allData.length; i++) {
     const row = allData[i];
     const timestamp = new Date(row[0]);
-    const rowStationId = row[1];
+    const rowStationId = String(row[1]); // 明示的に文字列に変換
     const temperature = Number(row[2]);
 
     if (rowStationId === stationId &&
@@ -879,7 +893,7 @@ function loadOutdoorTemperatureData(
     }
   }
 
-  Logger.log(`スプレッドシートから外気温データを${dataMap.size}件読み込みました`);
+  Logger.log(`スプレッドシートから外気温データを${dataMap.size}件読み込みました（観測所ID: ${stationId}）`);
   return dataMap;
 }
 
