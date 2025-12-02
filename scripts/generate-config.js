@@ -63,23 +63,47 @@ const slackWebhookMatch = envContent.match(/^SLACK_WEBHOOK_URL=(.+)$/m);
 const slackWebhookUrl = slackWebhookMatch ? slackWebhookMatch[1].trim() : '';
 
 // config.ts を生成
+// Google Apps Script は export/import をサポートしていないため、
+// グローバル変数として宣言（declare を使って型定義のみ）
 const configTs = `/**
  * このファイルは自動生成されます
  * 編集しないでください - npm run build 時に .env から再生成されます
  */
 
-export const GENERATED_SHEET_CONFIGS = ${JSON.stringify(sheetConfigs, null, 2)};
-
-export const GENERATED_SLACK_WEBHOOK_URL = ${JSON.stringify(slackWebhookUrl)};
+// TypeScript の型チェック用の宣言
+// 実際のコードは dist/config.js として生成される
+declare const GENERATED_SHEET_CONFIGS: Array<{dataSheetName: string; postalCode: string}>;
+declare const GENERATED_SLACK_WEBHOOK_URL: string;
 `;
 
-const configPath = path.join(__dirname, '..', 'src', 'config.ts');
-fs.writeFileSync(configPath, configTs);
+// config.js を直接生成（Google Apps Script 用）
+const configJs = `/**
+ * このファイルは自動生成されます
+ * 編集しないでください - npm run build 時に .env から再生成されます
+ */
+
+var GENERATED_SHEET_CONFIGS = ${JSON.stringify(sheetConfigs, null, 2)};
+
+var GENERATED_SLACK_WEBHOOK_URL = ${JSON.stringify(slackWebhookUrl)};
+`;
+
+// TypeScript 型定義ファイルを生成
+const configTsPath = path.join(__dirname, '..', 'src', 'config.ts');
+fs.writeFileSync(configTsPath, configTs);
+
+// Google Apps Script 用の JavaScript ファイルを生成
+const distPath = path.join(__dirname, '..', 'dist');
+if (!fs.existsSync(distPath)) {
+  fs.mkdirSync(distPath, { recursive: true });
+}
+const configJsPath = path.join(distPath, 'config.js');
+fs.writeFileSync(configJsPath, configJs);
 
 if (usingExample) {
   console.log('');
 }
-console.log('✓ src/config.ts を生成しました');
+console.log('✓ src/config.ts を生成しました（TypeScript 型定義）');
+console.log('✓ dist/config.js を生成しました（Google Apps Script用）');
 console.log(`  シート数: ${sheetConfigs.length}`);
 console.log(`  Slack Webhook: ${slackWebhookUrl ? '設定済み' : '未設定'}`);
 if (usingExample) {

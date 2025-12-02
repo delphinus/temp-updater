@@ -1,4 +1,10 @@
 /**
+ * 自動生成された設定の型定義を読み込み
+ * config.ts は npm run build 時に .env から自動生成されます
+ */
+/// <reference path="./config.ts" />
+
+/**
  * シート設定の型定義
  */
 interface SheetConfig {
@@ -101,10 +107,9 @@ function getSheetConfigs(): SheetConfig[] {
 /**
  * 初回セットアップ: スクリプトプロパティに設定を保存
  *
- * この関数を実行する前に、以下の値を自分の環境に合わせて編集してください：
- * - sheetConfigs: データシート名と外気温取得用の郵便番号のリスト
- *   （グラフシート名とタイトルは自動生成されます）
- * - SLACK_WEBHOOK_URL: Slack Incoming Webhook URL（データ欠損通知用）
+ * 設定は .env ファイルから自動的に読み込まれます。
+ * .env ファイルを編集後、npm run build を実行してから、
+ * このスクリプトをGASエディタで実行してください。
  *
  * 注: このスクリプトはスプレッドシートに紐付いているため、スプレッドシートIDは不要です。
  *
@@ -113,22 +118,13 @@ function getSheetConfigs(): SheetConfig[] {
 function setupConfig(): void {
   const properties = PropertiesService.getScriptProperties();
 
-  // ここに自分の環境に合わせた値を設定してください
-  // データシート名と郵便番号を指定（グラフシート名とタイトルは自動生成されます）
-  const sheetConfigs = [
-    {
-      dataSheetName: 'フォームの回答 1',
-      postalCode: '1000001'  // 外気温取得用の郵便番号（ハイフンなし7桁）
-    },
-    {
-      dataSheetName: 'フォームの回答 2',
-      postalCode: '1000001'  // 外気温取得用の郵便番号（ハイフンなし7桁）
-    }
-  ];
+  // .env ファイルから自動生成された設定を使用
+  const sheetConfigs = GENERATED_SHEET_CONFIGS;
+  const slackWebhookUrl = GENERATED_SLACK_WEBHOOK_URL;
 
   const config = {
     'SHEET_CONFIGS': JSON.stringify(sheetConfigs),
-    'SLACK_WEBHOOK_URL': 'https://hooks.slack.com/services/YOUR/WEBHOOK/URL'
+    'SLACK_WEBHOOK_URL': slackWebhookUrl
   };
 
   properties.setProperties(config);
@@ -138,6 +134,7 @@ function setupConfig(): void {
   sheetConfigs.forEach((sheet, index) => {
     Logger.log(`[${index + 1}] ${sheet.dataSheetName} → ${sheet.dataSheetName}のグラフ (郵便番号: ${sheet.postalCode})`);
   });
+  Logger.log(`Slack Webhook URL: ${slackWebhookUrl ? '設定済み' : '未設定'}`);
   Logger.log('\n設定完了！updateAllCharts() を実行してグラフを作成できます。');
 }
 

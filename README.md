@@ -159,37 +159,21 @@ npx clasp open
 
 ### 1. 設定値の保存（setupConfig）
 
-シート名や Slack Webhook URL をスクリプトプロパティに保存します。
+`.env` ファイルの設定を自動的にスクリプトプロパティに保存します。
 
 **手順:**
 
-1. **src/main.ts の setupConfig() 関数を編集**
+1. **ビルドとデプロイ**
 
-   `.env` ファイルに設定した内容を参照して、`src/main.ts` の `setupConfig()` 関数を編集します：
-
-   ```typescript
-   const sheetConfigs = [
-     {
-       dataSheetName: 'フォームの回答 1',  // .env の SHEET_CONFIGS と同じ
-       postalCode: '1000001'
-     }
-   ];
-
-   const config = {
-     'SHEET_CONFIGS': JSON.stringify(sheetConfigs),
-     'SLACK_WEBHOOK_URL': 'https://hooks.slack.com/services/YOUR/WEBHOOK/URL'  // .env と同じ
-   };
-   ```
-
-   **重要**: `.env` ファイルの値と一致させてください。
-
-2. **編集後、デプロイ**
+   `.env` ファイルから設定が自動的に読み込まれ、`setupConfig()` 関数に埋め込まれます：
 
    ```bash
    npm run push
    ```
 
-3. **GASエディタで setupConfig を実行**
+   ビルド時に `.env` の内容から `src/config.ts` が自動生成され、`setupConfig()` がそれを使用します。
+
+2. **GASエディタで setupConfig を実行**
 
    - GASエディタを開く（`npx clasp open`）
    - 関数選択ドロップダウンから `setupConfig` を選択
@@ -197,7 +181,10 @@ npx clasp open
    - 初回実行時、権限の承認を求められるので承認
    - ログに「設定を保存しました」と表示されることを確認
 
-**補足**: 設定が正しく保存されたか確認したい場合は、`showConfig` 関数を実行してください。スプレッドシート情報も表示されます。
+**補足**:
+- `setupConfig()` は `.env` ファイルの内容を自動的に使用します（手動編集不要）
+- 設定が正しく保存されたか確認したい場合は、`showConfig` 関数を実行してください
+- `.env` を変更した場合は、`npm run push` で再デプロイしてから `setupConfig` を再実行してください
 
 ### 2. トリガーの設定
 
