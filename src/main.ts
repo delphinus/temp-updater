@@ -271,9 +271,8 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
     charts.forEach(chart => chartSheet.removeChart(chart));
     chartSheet.clear();
 
-    // グラフ用のデータを作成（タイムスタンプ、室内温度、湿度、外気温の4列）
+    // グラフ用のデータを作成（ヘッダーは予報の有無が確定してから追加する）
     const chartData: any[][] = [];
-    chartData.push(['時刻', '室内温度 (℃)', '湿度 (%)', '外気温 (℃)']); // ヘッダー
 
     // 温度と湿度の最小値・最大値を計算するための配列とデータ
     const indoorTemperatures: number[] = [];
@@ -304,9 +303,25 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
       outdoorTemperatures.push(outdoorTemp !== null ? outdoorTemp : NaN);
     }
 
-    // 温度の範囲を計算（室内温度と外気温の両方を含む、マージン付き）
+    // 今後24時間の外気温予報を取得（取得失敗時は空配列 → 従来通り4列で描画）
+    const forecastData = getOutdoorForecast(config.postalCode, FORECAST_HOURS_AHEAD);
+    const hasForecast = forecastData.length > 0;
+    const numCols = hasForecast ? 5 : 4;
+
+    // 予報は毎正時のデータなので、正時のタイムスタンプ（ミリ秒）をキーにしたMapにする
+    const HOUR_MS = 60 * 60 * 1000;
+    const forecastByHour = new Map<number, number>();
+    for (const f of forecastData) {
+      if (f.temperature !== null) {
+        const hourKey = Math.round(f.timestamp.getTime() / HOUR_MS) * HOUR_MS;
+        forecastByHour.set(hourKey, f.temperature);
+      }
+    }
+    const forecastTemps = Array.from(forecastByHour.values());
+
+    // 温度の範囲を計算（室内温度・外気温・予報を含む、マージン付き）
     const validOutdoorTemps = outdoorTemperatures.filter(t => !isNaN(t));
-    const allTemperatures = [...indoorTemperatures, ...validOutdoorTemps];
+    const allTemperatures = [...indoorTemperatures, ...validOutdoorTemps, ...forecastTemps];
     const tempMin = Math.min(...allTemperatures);
     const tempMax = Math.max(...allTemperatures);
     const tempRange = tempMax - tempMin;
@@ -341,11 +356,28 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
       outdoorTempMaxIndex = outdoorTemperatures.indexOf(outdoorTempMax);
     }
 
-    // データ行を追加（4列：時刻、室内温度、湿度、外気温）
+    // ヘッダー行を追加（予報がある場合のみ5列目を付与）
+    const header = ['時刻', '室内温度 (℃)', '湿度 (%)', '外気温 (℃)'];
+    if (hasForecast) {
+      header.push('外気温(予報) (℃)');
+    }
+    chartData.push(header);
+
+    // データ行を追加。予報列には「その時刻の24時間後の予報値」を入れる。
+    // これにより今後24時間の予報が「24時間前〜現在」の位置に重なり、同じ時刻帯で
+    // 実測（今日）と予報（翌日同時刻）を比較できる。予報を実測と同じ行に持たせるので、
+    // 行が交互にならず折れ線が途切れない（直近24時間の実測行にのみ予報値が入る）。
+    const shiftMs = FORECAST_HOURS_AHEAD * HOUR_MS;
     for (let i = 0; i < dataRows.length; i++) {
       const [timestamp, indoorTemp, humidity] = dataRows[i];
       const outdoorTemp = outdoorTemperatures[i];
-      chartData.push([timestamp, indoorTemp, humidity, isNaN(outdoorTemp) ? null : outdoorTemp]);
+      const row: any[] = [timestamp, indoorTemp, humidity, isNaN(outdoorTemp) ? null : outdoorTemp];
+      if (hasForecast) {
+        const targetHour = Math.round((timestamp.getTime() + shiftMs) / HOUR_MS) * HOUR_MS;
+        const fcst = forecastByHour.get(targetHour);
+        row.push(fcst !== undefined ? fcst : null);
+      }
+      chartData.push(row);
     }
 
     // サブタイトルを作成（最小値・最大値の情報を含む）
@@ -362,25 +394,66 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
       subtitle += `   外気: 最低 ${outdoorTempMin}℃ (${outdoorTempMinTime}) / 最高 ${outdoorTempMax}℃ (${outdoorTempMaxTime})`;
     }
 
+    if (hasForecast && forecastTemps.length > 0) {
+      const forecastMin = Math.min(...forecastTemps);
+      const forecastMax = Math.max(...forecastTemps);
+      subtitle += `   予報: 最低 ${forecastMin}℃ / 最高 ${forecastMax}℃`;
+    }
+
     // データをチャートシートに書き込み
-    const dataRange = chartSheet.getRange(1, 1, chartData.length, 4);
+    const dataRange = chartSheet.getRange(1, 1, chartData.length, numCols);
     dataRange.setValues(chartData);
 
     // タイムスタンプ列のフォーマット設定
     chartSheet.getRange(2, 1, chartData.length - 1, 1)
       .setNumberFormat('m/d hh:mm');
 
-    // データ列を非表示にする（A, B, C, D列）
-    chartSheet.hideColumns(1, 4);
+    // データ列を非表示にする
+    chartSheet.hideColumns(1, numCols);
 
     // データポイント数に応じてpointSizeを調整（100件以上なら丸を非表示）
     const dataPointCount = chartData.length - 1; // ヘッダー行を除く
     const pointSize = dataPointCount > 100 ? 0 : 5;
 
+    // 系列設定（予報がある場合は4系列目に破線の「外気温(予報)」を追加）
+    const seriesConfig: any = {
+      0: {
+        targetAxisIndex: 0,
+        color: '#FF6B6B',
+        lineWidth: 2,
+        pointSize: pointSize,
+        labelInLegend: '室内温度'
+      },
+      1: {
+        targetAxisIndex: 1,
+        color: '#4ECDC4',
+        lineWidth: 2,
+        pointSize: pointSize,
+        labelInLegend: '湿度'
+      },
+      2: {
+        targetAxisIndex: 0,
+        color: '#FFA500',
+        lineWidth: 2,
+        pointSize: pointSize,
+        labelInLegend: '外気温'
+      }
+    };
+    if (hasForecast) {
+      // 埋め込みグラフは lineDashStyle（破線）を無視するため、実測とは別の色で区別する
+      seriesConfig[3] = {
+        targetAxisIndex: 0,
+        color: '#9B59B6',
+        lineWidth: 2,
+        pointSize: 4,
+        labelInLegend: '外気温(予報)'
+      };
+    }
+
     // グラフを作成
     const chart = chartSheet.newChart()
       .setChartType(Charts.ChartType.LINE)
-      .addRange(chartSheet.getRange(1, 1, chartData.length, 4))
+      .addRange(chartSheet.getRange(1, 1, chartData.length, numCols))
       .setPosition(1, 1, 0, 0)
       .setOption('title', config.chartTitle)
       .setOption('subtitle', subtitle)
@@ -395,29 +468,7 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
           count: 5
         }
       })
-      .setOption('series', {
-        0: {
-          targetAxisIndex: 0,
-          color: '#FF6B6B',
-          lineWidth: 2,
-          pointSize: pointSize,
-          labelInLegend: '室内温度'
-        },
-        1: {
-          targetAxisIndex: 1,
-          color: '#4ECDC4',
-          lineWidth: 2,
-          pointSize: pointSize,
-          labelInLegend: '湿度'
-        },
-        2: {
-          targetAxisIndex: 0,
-          color: '#FFA500',
-          lineWidth: 2,
-          pointSize: pointSize,
-          labelInLegend: '外気温'
-        }
-      })
+      .setOption('series', seriesConfig)
       .setOption('vAxes', {
         0: {
           title: '温度 (℃)',
@@ -653,6 +704,26 @@ function getLatLonFromPostalCode(postalCode: string): LatLon {
 }
 
 /**
+ * 郵便番号から緯度経度を取得してキャッシュ
+ * 毎回API呼び出しを避けるため、Cacheサービスを使用（24時間有効）
+ * @param postalCode 郵便番号（ハイフンなし7桁）
+ */
+function getLatLonFromPostalCodeWithCache(postalCode: string): LatLon {
+  const cache = CacheService.getScriptCache();
+  const cacheKey = `latlon_${postalCode}`;
+
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    const parsed = JSON.parse(cached);
+    return { lat: parsed.lat, lon: parsed.lon };
+  }
+
+  const latlon = getLatLonFromPostalCode(postalCode);
+  cache.put(cacheKey, JSON.stringify(latlon), 86400); // 24時間 = 86400秒
+  return latlon;
+}
+
+/**
  * 2点間の距離を計算（Haversine公式）
  * @returns 距離（km）
  */
@@ -809,6 +880,11 @@ function getAmedasStationId(postalCode: string): string {
  * 外気温データ保存用シートの名前
  */
 const OUTDOOR_TEMP_SHEET_NAME = '外気温データ';
+
+/**
+ * 外気温予報を取得する時間数（現在からこの時間先まで）
+ */
+const FORECAST_HOURS_AHEAD = 24;
 
 /**
  * 外気温データ保存用シートを取得または作成
@@ -1086,7 +1162,8 @@ function updateChartWithDateRange(
   sheetIndex: number,
   startDateStr: string,
   endDateStr: string,
-  options: ChartDisplayOptions
+  options: ChartDisplayOptions,
+  includeForecast: boolean = false
 ): void {
   try {
     const configs = getSheetConfigs();
@@ -1095,6 +1172,17 @@ function updateChartWithDateRange(
     }
 
     const config = configs[sheetIndex];
+
+    // 「2日間」プリセットのときは、通常の自動更新グラフと同じ表示にする
+    // （実測2日 + 今後24時間の予報を24時間前〜現在に重ねて表示）。
+    // 予報を表示するのはこのケースだけ。
+    if (includeForecast) {
+      Logger.log(`グラフ更新（2日間・予報あり）: ${config.dataSheetName}`);
+      updateSingleChart(config);
+      Logger.log('グラフ更新完了');
+      return;
+    }
+
     const startDate = new Date(startDateStr);
     const endDate = new Date(endDateStr);
 
@@ -1642,4 +1730,74 @@ function getDailyOutdoorTemperature(stationId: string, date: Date): { max: numbe
     max: Math.max(...temps),
     min: Math.min(...temps)
   };
+}
+
+// ========================================
+// 外気温予報データの取得機能（Open-Meteo）
+// ========================================
+
+/**
+ * 今後の外気温予報を毎時で取得する
+ *
+ * Open-Meteo（無料・APIキー不要）から毎時の気温予報を取得する。
+ * 日本では気象庁（JMA）の数値モデルを使用するため、アメダス実測とも整合する。
+ * 緯度経度は既存の郵便番号変換（キャッシュ付き）を流用する。
+ *
+ * @param postalCode 郵便番号（ハイフンなし7桁）
+ * @param hoursAhead 現在から何時間先までの予報を取得するか
+ * @returns 現在より後の毎正時の予報データ配列（取得失敗時は空配列）
+ */
+function getOutdoorForecast(postalCode: string, hoursAhead: number): TemperatureData[] {
+  try {
+    const latlon = getLatLonFromPostalCodeWithCache(postalCode);
+
+    // timeformat=unixtime にすることで時刻はUTC秒の絶対値となり、
+    // new Date(t * 1000) で曖昧さなく変換できる（ISO文字列のローカル/UTC解釈問題を回避）。
+    // models=jma_seamless で気象庁の数値モデルを使用する。
+    const url = 'https://api.open-meteo.com/v1/forecast' +
+      `?latitude=${latlon.lat}` +
+      `&longitude=${latlon.lon}` +
+      '&hourly=temperature_2m' +
+      '&timezone=Asia%2FTokyo' +
+      '&forecast_days=2' +
+      '&models=jma_seamless' +
+      '&timeformat=unixtime';
+
+    const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+
+    if (response.getResponseCode() !== 200) {
+      Logger.log(`外気温予報の取得失敗: HTTPステータス ${response.getResponseCode()}`);
+      return [];
+    }
+
+    const json = JSON.parse(response.getContentText());
+
+    if (!json.hourly || !json.hourly.time || !json.hourly.temperature_2m) {
+      Logger.log('外気温予報のレスポンス形式が想定外です');
+      return [];
+    }
+
+    const times: number[] = json.hourly.time;
+    const temps: Array<number | null> = json.hourly.temperature_2m;
+
+    // 現在の正時より後 〜 現在 + hoursAhead の範囲だけを抽出
+    const now = new Date();
+    const fromTime = now.getTime();
+    const toTime = now.getTime() + hoursAhead * 60 * 60 * 1000;
+
+    const results: TemperatureData[] = [];
+    for (let i = 0; i < times.length; i++) {
+      const timestamp = new Date(times[i] * 1000);
+      const t = timestamp.getTime();
+      if (t > fromTime && t <= toTime && temps[i] !== null && temps[i] !== undefined) {
+        results.push({ timestamp: timestamp, temperature: temps[i] });
+      }
+    }
+
+    Logger.log(`外気温予報を取得しました（${results.length}件、郵便番号: ${postalCode}）`);
+    return results;
+  } catch (error) {
+    Logger.log(`外気温予報の取得エラー: ${error}`);
+    return [];
+  }
 }
