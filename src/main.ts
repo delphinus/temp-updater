@@ -266,12 +266,9 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
       chartSheet = spreadsheet.insertSheet(config.chartSheetName);
     }
 
-    // 既存のグラフとデータを削除
-    const charts = chartSheet.getCharts();
-    charts.forEach(chart => chartSheet.removeChart(chart));
-    chartSheet.clear();
-
     // グラフ用のデータを作成（ヘッダーは予報の有無が確定してから追加する）
+    // 注意: 既存グラフ・データの削除は、外部API取得が全て終わって書き込む直前に行う。
+    // 先にクリアしてしまうと、途中で取得が失敗したときにグラフが消えたままになるため。
     const chartData: any[][] = [];
 
     // 温度と湿度の最小値・最大値を計算するための配列とデータ
@@ -399,6 +396,12 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
       const forecastMax = Math.max(...forecastTemps);
       subtitle += `   予報: 最低 ${forecastMin}℃ / 最高 ${forecastMax}℃`;
     }
+
+    // ここまでで必要なデータ取得が完了。書き込む直前に既存のグラフとデータを削除する
+    // （途中でデータ取得が失敗してもグラフが消えないようにするため）
+    const existingCharts = chartSheet.getCharts();
+    existingCharts.forEach(chart => chartSheet.removeChart(chart));
+    chartSheet.clear();
 
     // データをチャートシートに書き込み
     const dataRange = chartSheet.getRange(1, 1, chartData.length, numCols);
@@ -1253,12 +1256,8 @@ function updateShortPeriodChart(
     chartSheet = spreadsheet.insertSheet(config.chartSheetName);
   }
 
-  // 既存のグラフとデータを削除
-  const charts = chartSheet.getCharts();
-  charts.forEach(chart => chartSheet.removeChart(chart));
-  chartSheet.clear();
-
-  // グラフ用のデータを作成
+  // グラフ用のデータを作成（既存グラフ・データの削除は書き込む直前に行う。
+  // 先にクリアすると、途中で外部API取得が失敗したときにグラフが消えたままになるため）
   const chartData: any[][] = [];
   chartData.push(['時刻', '室内温度 (℃)', '湿度 (%)', '外気温 (℃)']);
 
@@ -1346,6 +1345,11 @@ function updateShortPeriodChart(
     const outdoorTempMaxTime = Utilities.formatDate(timestamps[outdoorTempMaxIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
     subtitle += `   外気: 最低 ${outdoorTempMin}℃ (${outdoorTempMinTime}) / 最高 ${outdoorTempMax}℃ (${outdoorTempMaxTime})`;
   }
+
+  // ここまでで必要なデータ取得が完了。書き込む直前に既存のグラフとデータを削除する
+  const existingCharts = chartSheet.getCharts();
+  existingCharts.forEach(chart => chartSheet.removeChart(chart));
+  chartSheet.clear();
 
   // データをチャートシートに書き込み
   const dataRange = chartSheet.getRange(1, 1, chartData.length, 4);
