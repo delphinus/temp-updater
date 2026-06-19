@@ -379,6 +379,9 @@
         showOutdoorTemp: document.getElementById('showOutdoorTemp').checked
       };
 
+      // 外気温の予報を重ねて表示するのは「2日間」プリセットのときだけ
+      const includeForecast = !isCustomMode && selectedDays === 2;
+
       showStatus('info', 'グラフを更新中...');
       document.getElementById('updateBtn').disabled = true;
 
@@ -391,7 +394,7 @@
           showStatus('error', 'エラー: ' + error);
           document.getElementById('updateBtn').disabled = false;
         })
-        .updateChartWithDateRange(sheetIndex, startDate, endDate, options);
+        .updateChartWithDateRange(sheetIndex, startDate, endDate, options, includeForecast);
     }
 
     // ステータス表示
