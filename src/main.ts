@@ -42,6 +42,22 @@ interface TemperatureData {
 }
 
 /**
+ * 降水量データの型定義（実績）
+ */
+interface PrecipitationData {
+  timestamp: Date;
+  precipitation: number | null;
+}
+
+/**
+ * 降水確率データの型定義（予報）
+ */
+interface PrecipitationProbabilityData {
+  timestamp: Date;
+  probability: number | null;
+}
+
+/**
  * データ欠損情報の型定義
  */
 interface DataGapInfo {
@@ -397,6 +413,83 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
       subtitle += `   予報: 最低 ${forecastMin}℃ / 最高 ${forecastMax}℃`;
     }
 
+    // ---- 降水（実績降水量・予報降水確率）データの取得（best-effort）----
+    // 降水は毎正時なので、温度グラフの密なセンサ時刻とは別に「1時間刻み」の時間軸で棒グラフを描く。
+    // ここでの取得が失敗しても温度グラフには影響させない（降水系列/グラフのみ欠落させる）。
+    const precipStartHour = new Date(timestamps[0]);
+    precipStartHour.setMinutes(0, 0, 0);
+    const precipEndHour = new Date();
+    precipEndHour.setMinutes(0, 0, 0);
+    const precipHours: Date[] = [];
+    for (let t = precipStartHour.getTime(); t <= precipEndHour.getTime(); t += HOUR_MS) {
+      precipHours.push(new Date(t));
+    }
+
+    // 実績降水量（アメダス、温度と同じ観測所を再利用）
+    const precipActual = getPrecipitationWithCache(stationId, precipHours);
+
+    // 予報降水確率（Open-Meteo、今後24時間）を正時キーのMapにする
+    const precipForecast = getPrecipitationProbabilityForecast(config.postalCode, FORECAST_HOURS_AHEAD);
+    const hasPrecipForecast = precipForecast.length > 0;
+    const forecastProbByHour = new Map<number, number>();
+    for (const f of precipForecast) {
+      if (f.probability !== null) {
+        const hourKey = Math.round(f.timestamp.getTime() / HOUR_MS) * HOUR_MS;
+        forecastProbByHour.set(hourKey, f.probability);
+      }
+    }
+
+    // 降水グラフ用のデータ行を作成。予報確率は温度予報と同じシフト方式で
+    // 「その時刻の24時間後の予報値」を入れ、今後24時間の予報を24時間前〜現在に重ねる。
+    const precipHeader = ['時刻', '降水量(実績) (mm)'];
+    if (hasPrecipForecast) {
+      precipHeader.push('降水確率(予報) (%)');
+    }
+    const precipChartData: any[][] = [precipHeader];
+    const probsForStats: number[] = [];
+    let totalPrecip = 0;
+    let maxPrecip = 0;
+    let maxPrecipHour: Date | null = null;
+    let hasAnyActual = false;
+    for (let i = 0; i < precipHours.length; i++) {
+      const hour = precipHours[i];
+      const amount = precipActual[i].precipitation;
+      const row: any[] = [hour, amount !== null ? amount : null];
+      if (amount !== null) {
+        hasAnyActual = true;
+        totalPrecip += amount;
+        if (amount > maxPrecip) {
+          maxPrecip = amount;
+          maxPrecipHour = hour;
+        }
+      }
+      if (hasPrecipForecast) {
+        const targetHour = Math.round((hour.getTime() + shiftMs) / HOUR_MS) * HOUR_MS;
+        const prob = forecastProbByHour.get(targetHour);
+        row.push(prob !== undefined ? prob : null);
+        if (prob !== undefined) {
+          probsForStats.push(prob);
+        }
+      }
+      precipChartData.push(row);
+    }
+
+    // 降水量・降水確率のどちらも無ければ降水グラフは描かない
+    const hasPrecipData = hasAnyActual || hasPrecipForecast;
+    const precipNumCols = hasPrecipForecast ? 3 : 2;
+    // 温度ブロック（1〜numCols列）の右に1列空けて降水ブロックを置く
+    const precipStartCol = numCols + 2;
+    const precipViewMax = Math.max(Math.ceil(maxPrecip * 1.2), 5);
+
+    let precipSubtitle = `実績降水量: 合計 ${Math.round(totalPrecip * 10) / 10} mm`;
+    if (maxPrecipHour !== null) {
+      const maxPrecipTime = Utilities.formatDate(maxPrecipHour, Session.getScriptTimeZone(), 'M/d HH:mm');
+      precipSubtitle += ` / 最大 ${maxPrecip} mm (${maxPrecipTime})`;
+    }
+    if (hasPrecipForecast && probsForStats.length > 0) {
+      precipSubtitle += `   予報降水確率: 最大 ${Math.max(...probsForStats)}%`;
+    }
+
     // ここまでで必要なデータ取得が完了。書き込む直前に既存のグラフとデータを削除する
     // （途中でデータ取得が失敗してもグラフが消えないようにするため）
     const existingCharts = chartSheet.getCharts();
@@ -499,6 +592,64 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
       .build();
 
     chartSheet.insertChart(chart);
+
+    // ---- 降水グラフ（2枚目、温度グラフの下）を描画（best-effort）----
+    if (hasPrecipData) {
+      // 降水ブロックを温度ブロックの右側（1列空けた位置）に書き込む
+      chartSheet.getRange(1, precipStartCol, precipChartData.length, precipNumCols)
+        .setValues(precipChartData);
+      chartSheet.getRange(2, precipStartCol, precipChartData.length - 1, 1)
+        .setNumberFormat('m/d hh:mm');
+      chartSheet.hideColumns(precipStartCol, precipNumCols);
+
+      const precipSeries: any = {
+        0: {
+          targetAxisIndex: 0,
+          color: '#4A90D9',
+          labelInLegend: '降水量(実績)'
+        }
+      };
+      const precipVAxes: any = {
+        0: {
+          title: '降水量 (mm)',
+          viewWindow: { min: 0, max: precipViewMax },
+          minorGridlines: { count: 4 }
+        }
+      };
+      if (hasPrecipForecast) {
+        precipSeries[1] = {
+          targetAxisIndex: 1,
+          color: '#9B59B6',
+          labelInLegend: '降水確率(予報)'
+        };
+        precipVAxes[1] = {
+          title: '降水確率 (%)',
+          viewWindow: { min: 0, max: 100 },
+          minorGridlines: { count: 4 }
+        };
+      }
+
+      const precipChart = chartSheet.newChart()
+        .setChartType(Charts.ChartType.COLUMN)
+        .addRange(chartSheet.getRange(1, precipStartCol, precipChartData.length, precipNumCols))
+        .setPosition(28, 1, 0, 0)
+        .setOption('title', `降水量(実績)・降水確率(予報)（最近2日間）- ${config.dataSheetName}`)
+        .setOption('subtitle', precipSubtitle)
+        .setOption('width', 1000)
+        .setOption('height', 500)
+        .setOption('hAxis', {
+          title: '時刻',
+          format: 'M/d HH:mm',
+          slantedText: true,
+          slantedTextAngle: 45
+        })
+        .setOption('series', precipSeries)
+        .setOption('vAxes', precipVAxes)
+        .setOption('legend', { position: 'bottom' })
+        .build();
+
+      chartSheet.insertChart(precipChart);
+    }
 
     Logger.log(`${config.dataSheetName}: グラフを更新しました（データ件数: ${recentData.length - 1}件）`);
 
@@ -791,35 +942,88 @@ function findNearestAmedasStation(lat: number, lon: number): AmedasStation {
 }
 
 /**
- * 指定時刻の気温データを取得
+ * アメダスの毎正時 map JSON を取得する（実行内メモ付き）
+ *
+ * map/YYYYMMDDHH0000.json は全観測所の温度・降水量等をまとめて含むため、
+ * 同一実行内で同じ時刻を何度も取得しないようメモ化する（温度と降水量で共用）。
+ *
+ * @param dateTimeStr YYYYMMDDHH0000 形式の文字列
+ * @returns 観測所IDをキーとした map データ。取得失敗時は null
  */
-function getTemperatureAtTime(stationId: string, datetime: Date): number | null {
-  try {
-    // 気象庁APIのURL形式: YYYYMMDDHH0000.json (毎正時)
-    const year = datetime.getFullYear();
-    const month = String(datetime.getMonth() + 1).padStart(2, '0');
-    const day = String(datetime.getDate()).padStart(2, '0');
-    const hour = String(datetime.getHours()).padStart(2, '0');
-    const dateTimeStr = `${year}${month}${day}${hour}0000`;
+const _amedasMapMemo: { [dateTimeStr: string]: any } = {};
 
+function fetchAmedasMap(dateTimeStr: string): any | null {
+  if (Object.prototype.hasOwnProperty.call(_amedasMapMemo, dateTimeStr)) {
+    return _amedasMapMemo[dateTimeStr];
+  }
+
+  try {
     const url = `https://www.jma.go.jp/bosai/amedas/data/map/${dateTimeStr}.json`;
     const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
 
     if (response.getResponseCode() !== 200) {
-      Logger.log(`気温データ取得失敗: ${datetime}, HTTPステータス: ${response.getResponseCode()}`);
+      Logger.log(`アメダスmap取得失敗: ${dateTimeStr}, HTTPステータス: ${response.getResponseCode()}`);
+      _amedasMapMemo[dateTimeStr] = null;
       return null;
     }
 
     const json = JSON.parse(response.getContentText());
-
-    if (json[stationId] && json[stationId].temp && json[stationId].temp.length > 0) {
-      return json[stationId].temp[0];
-    } else {
-      Logger.log(`気温データなし: ${datetime}, 観測所: ${stationId}`);
-      return null;
-    }
+    _amedasMapMemo[dateTimeStr] = json;
+    return json;
   } catch (error) {
-    Logger.log(`気温データ取得エラー: ${datetime}, ${error}`);
+    Logger.log(`アメダスmap取得エラー: ${dateTimeStr}, ${error}`);
+    _amedasMapMemo[dateTimeStr] = null;
+    return null;
+  }
+}
+
+/**
+ * Date から map JSON 用の YYYYMMDDHH0000 文字列を作る（毎正時）
+ */
+function toAmedasDateTimeStr(datetime: Date): string {
+  const year = datetime.getFullYear();
+  const month = String(datetime.getMonth() + 1).padStart(2, '0');
+  const day = String(datetime.getDate()).padStart(2, '0');
+  const hour = String(datetime.getHours()).padStart(2, '0');
+  return `${year}${month}${day}${hour}0000`;
+}
+
+/**
+ * 指定時刻の気温データを取得
+ */
+function getTemperatureAtTime(stationId: string, datetime: Date): number | null {
+  const dateTimeStr = toAmedasDateTimeStr(datetime);
+  const json = fetchAmedasMap(dateTimeStr);
+
+  if (json === null) {
+    Logger.log(`気温データ取得失敗: ${datetime}`);
+    return null;
+  }
+
+  if (json[stationId] && json[stationId].temp && json[stationId].temp.length > 0) {
+    return json[stationId].temp[0];
+  } else {
+    Logger.log(`気温データなし: ${datetime}, 観測所: ${stationId}`);
+    return null;
+  }
+}
+
+/**
+ * 指定時刻の降水量（実績、1時間降水量 mm）を取得
+ */
+function getPrecipitationAtTime(stationId: string, datetime: Date): number | null {
+  const dateTimeStr = toAmedasDateTimeStr(datetime);
+  const json = fetchAmedasMap(dateTimeStr);
+
+  if (json === null) {
+    Logger.log(`降水量データ取得失敗: ${datetime}`);
+    return null;
+  }
+
+  if (json[stationId] && json[stationId].precipitation1h && json[stationId].precipitation1h.length > 0) {
+    return json[stationId].precipitation1h[0];
+  } else {
+    Logger.log(`降水量データなし: ${datetime}, 観測所: ${stationId}`);
     return null;
   }
 }
@@ -839,6 +1043,30 @@ function getTemperatureHistory(stationId: string, timestamps: Date[]): Temperatu
     results.push({
       timestamp: timestamp,
       temperature: temp
+    });
+
+    // API負荷軽減のため、少し待機
+    Utilities.sleep(100);
+  }
+
+  return results;
+}
+
+/**
+ * 複数時刻の降水量（実績）データを取得
+ */
+function getPrecipitationHistory(stationId: string, timestamps: Date[]): PrecipitationData[] {
+  const results: PrecipitationData[] = [];
+
+  for (const timestamp of timestamps) {
+    // 正時に丸める（気象庁APIは毎正時のデータのみ）
+    const roundedTime = new Date(timestamp);
+    roundedTime.setMinutes(0, 0, 0);
+
+    const precipitation = getPrecipitationAtTime(stationId, roundedTime);
+    results.push({
+      timestamp: timestamp,
+      precipitation: precipitation
     });
 
     // API負荷軽減のため、少し待機
@@ -1111,6 +1339,192 @@ function getOutdoorTemperatureWithCache(
       );
       if (resultIndex >= 0) {
         results[resultIndex].temperature = fetchedItem.temperature;
+      }
+    }
+  }
+
+  return results;
+}
+
+// ========================================
+// 降水量（実績）のスプレッドシート保存機能
+// ========================================
+
+/**
+ * 降水量データ保存用シートの名前
+ */
+const PRECIP_SHEET_NAME = '降水量データ';
+
+/**
+ * 降水量データ保存用シートを取得または作成
+ */
+function getOrCreatePrecipSheet(): GoogleAppsScript.Spreadsheet.Sheet {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = spreadsheet.getSheetByName(PRECIP_SHEET_NAME);
+
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(PRECIP_SHEET_NAME);
+    // ヘッダー行を追加
+    sheet.getRange(1, 1, 1, 3).setValues([['タイムスタンプ', '観測所ID', '降水量']]);
+    sheet.getRange(1, 1, 1, 3).setFontWeight('bold');
+  }
+
+  return sheet;
+}
+
+/**
+ * 降水量データをスプレッドシートに保存（重複チェック付き）
+ * @param stationId 観測所ID
+ * @param data 降水量データの配列
+ */
+function savePrecipitationData(stationId: string, data: PrecipitationData[]): void {
+  const sheet = getOrCreatePrecipSheet();
+
+  // 既存データを読み込んで重複チェック用のSetを作成
+  const allData = sheet.getDataRange().getValues();
+  const existingKeys = new Set<string>();
+
+  for (let i = 1; i < allData.length; i++) {
+    const row = allData[i];
+    const timestamp = new Date(row[0]);
+    const rowStationId = String(row[1]);
+
+    // 正時に丸めてキーを作成
+    const roundedTime = new Date(timestamp);
+    roundedTime.setMinutes(0, 0, 0);
+    const key = `${rowStationId}_${roundedTime.getTime()}`;
+    existingKeys.add(key);
+  }
+
+  // 重複していないデータのみを追加
+  const newRows: any[][] = [];
+
+  for (const item of data) {
+    if (item.precipitation !== null) {
+      // 正時に丸めてキーを作成
+      const roundedTime = new Date(item.timestamp);
+      roundedTime.setMinutes(0, 0, 0);
+      const key = `${stationId}_${roundedTime.getTime()}`;
+
+      if (!existingKeys.has(key)) {
+        newRows.push([item.timestamp, stationId, item.precipitation]);
+        existingKeys.add(key); // 今回追加するデータ内での重複も防ぐ
+      }
+    }
+  }
+
+  if (newRows.length > 0) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, 3).setValues(newRows);
+  }
+}
+
+/**
+ * スプレッドシートから降水量データを読み込み
+ * @param stationId 観測所ID
+ * @param startDate 開始日時
+ * @param endDate 終了日時
+ * @returns 正時タイムスタンプ(ms)をキーとした降水量のマップ
+ */
+function loadPrecipitationData(
+  stationId: string,
+  startDate: Date,
+  endDate: Date
+): Map<number, number> {
+  const sheet = getOrCreatePrecipSheet();
+  const allData = sheet.getDataRange().getValues();
+  const dataMap = new Map<number, number>();
+
+  // ヘッダー行をスキップして、指定期間のデータを読み込む
+  for (let i = 1; i < allData.length; i++) {
+    const row = allData[i];
+    const timestamp = new Date(row[0]);
+    const rowStationId = String(row[1]); // 明示的に文字列に変換
+    const precipitation = Number(row[2]);
+
+    if (rowStationId === stationId &&
+        timestamp >= startDate &&
+        timestamp <= endDate) {
+      // タイムスタンプを正時に丸めてキーにする
+      const roundedTime = new Date(timestamp);
+      roundedTime.setMinutes(0, 0, 0);
+      dataMap.set(roundedTime.getTime(), precipitation);
+    }
+  }
+
+  return dataMap;
+}
+
+/**
+ * 降水量（実績）データを取得（スプレッドシートキャッシュ優先）
+ * 温度の getOutdoorTemperatureWithCache と同一ロジック。
+ * @param stationId 観測所ID
+ * @param timestamps タイムスタンプの配列（毎正時を想定）
+ * @returns 降水量データの配列
+ */
+function getPrecipitationWithCache(
+  stationId: string,
+  timestamps: Date[]
+): PrecipitationData[] {
+  if (timestamps.length === 0) {
+    return [];
+  }
+
+  const startDate = new Date(Math.min(...timestamps.map(t => t.getTime())));
+  const endDate = new Date(Math.max(...timestamps.map(t => t.getTime())));
+
+  // スプレッドシートから既存データを読み込み
+  const cachedData = loadPrecipitationData(stationId, startDate, endDate);
+
+  // 直近2日の範囲を計算
+  const twoDaysAgo = new Date();
+  twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
+
+  const results: PrecipitationData[] = [];
+  const missingData: Date[] = [];
+
+  for (const timestamp of timestamps) {
+    const roundedTime = new Date(timestamp);
+    roundedTime.setMinutes(0, 0, 0);
+    const timeKey = roundedTime.getTime();
+
+    if (cachedData.has(timeKey)) {
+      // キャッシュにある場合
+      results.push({
+        timestamp: timestamp,
+        precipitation: cachedData.get(timeKey)!
+      });
+    } else if (timestamp >= twoDaysAgo) {
+      // 直近2日でキャッシュにない場合は、後でAPIから取得
+      missingData.push(timestamp);
+      results.push({
+        timestamp: timestamp,
+        precipitation: null
+      });
+    } else {
+      // 2日より前でキャッシュにない場合は、データなし
+      results.push({
+        timestamp: timestamp,
+        precipitation: null
+      });
+    }
+  }
+
+  // 欠けているデータをAPIから取得
+  if (missingData.length > 0) {
+    const fetchedData = getPrecipitationHistory(stationId, missingData);
+
+    // 取得したデータをスプレッドシートに保存
+    savePrecipitationData(stationId, fetchedData);
+
+    // 結果に反映
+    for (let i = 0; i < fetchedData.length; i++) {
+      const fetchedItem = fetchedData[i];
+      // resultsから対応するタイムスタンプを見つけて更新
+      const resultIndex = results.findIndex(r =>
+        r.timestamp.getTime() === fetchedItem.timestamp.getTime()
+      );
+      if (resultIndex >= 0) {
+        results[resultIndex].precipitation = fetchedItem.precipitation;
       }
     }
   }
@@ -1802,6 +2216,74 @@ function getOutdoorForecast(postalCode: string, hoursAhead: number): Temperature
     return results;
   } catch (error) {
     Logger.log(`外気温予報の取得エラー: ${error}`);
+    return [];
+  }
+}
+
+/**
+ * 今後の降水確率（予報）を毎時で取得する
+ *
+ * Open-Meteo（無料・APIキー不要）から毎時の降水確率を取得する。
+ * 注意: precipitation_probability は models=jma_seamless では null になるため、
+ * ここではモデル指定なし（best_match、全球アンサンブル由来）で取得する。
+ * 緯度経度は既存の郵便番号変換（キャッシュ付き）を流用する。
+ *
+ * @param postalCode 郵便番号（ハイフンなし7桁）
+ * @param hoursAhead 現在から何時間先までの予報を取得するか
+ * @returns 現在より後の毎正時の予報データ配列（取得失敗時は空配列）
+ */
+function getPrecipitationProbabilityForecast(
+  postalCode: string,
+  hoursAhead: number
+): PrecipitationProbabilityData[] {
+  try {
+    const latlon = getLatLonFromPostalCodeWithCache(postalCode);
+
+    // models は指定しない（jma_seamless だと precipitation_probability が全て null になるため）。
+    // timeformat=unixtime でUTC秒の絶対値として扱い、new Date(t * 1000) で曖昧さなく変換する。
+    const url = 'https://api.open-meteo.com/v1/forecast' +
+      `?latitude=${latlon.lat}` +
+      `&longitude=${latlon.lon}` +
+      '&hourly=precipitation_probability' +
+      '&timezone=Asia%2FTokyo' +
+      '&forecast_days=2' +
+      '&timeformat=unixtime';
+
+    const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+
+    if (response.getResponseCode() !== 200) {
+      Logger.log(`降水確率予報の取得失敗: HTTPステータス ${response.getResponseCode()}`);
+      return [];
+    }
+
+    const json = JSON.parse(response.getContentText());
+
+    if (!json.hourly || !json.hourly.time || !json.hourly.precipitation_probability) {
+      Logger.log('降水確率予報のレスポンス形式が想定外です');
+      return [];
+    }
+
+    const times: number[] = json.hourly.time;
+    const probabilities: Array<number | null> = json.hourly.precipitation_probability;
+
+    // 現在の正時より後 〜 現在 + hoursAhead の範囲だけを抽出
+    const now = new Date();
+    const fromTime = now.getTime();
+    const toTime = now.getTime() + hoursAhead * 60 * 60 * 1000;
+
+    const results: PrecipitationProbabilityData[] = [];
+    for (let i = 0; i < times.length; i++) {
+      const timestamp = new Date(times[i] * 1000);
+      const t = timestamp.getTime();
+      if (t > fromTime && t <= toTime && probabilities[i] !== null && probabilities[i] !== undefined) {
+        results.push({ timestamp: timestamp, probability: probabilities[i] });
+      }
+    }
+
+    Logger.log(`降水確率予報を取得しました（${results.length}件、郵便番号: ${postalCode}）`);
+    return results;
+  } catch (error) {
+    Logger.log(`降水確率予報の取得エラー: ${error}`);
     return [];
   }
 }
