@@ -413,83 +413,6 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
       subtitle += `   予報: 最低 ${forecastMin}℃ / 最高 ${forecastMax}℃`;
     }
 
-    // ---- 降水（実績降水量・予報降水確率）データの取得（best-effort）----
-    // 降水は毎正時なので、温度グラフの密なセンサ時刻とは別に「1時間刻み」の時間軸で棒グラフを描く。
-    // ここでの取得が失敗しても温度グラフには影響させない（降水系列/グラフのみ欠落させる）。
-    const precipStartHour = new Date(timestamps[0]);
-    precipStartHour.setMinutes(0, 0, 0);
-    const precipEndHour = new Date();
-    precipEndHour.setMinutes(0, 0, 0);
-    const precipHours: Date[] = [];
-    for (let t = precipStartHour.getTime(); t <= precipEndHour.getTime(); t += HOUR_MS) {
-      precipHours.push(new Date(t));
-    }
-
-    // 実績降水量（アメダス、温度と同じ観測所を再利用）
-    const precipActual = getPrecipitationWithCache(stationId, precipHours);
-
-    // 予報降水確率（Open-Meteo、今後24時間）を正時キーのMapにする
-    const precipForecast = getPrecipitationProbabilityForecast(config.postalCode, FORECAST_HOURS_AHEAD);
-    const hasPrecipForecast = precipForecast.length > 0;
-    const forecastProbByHour = new Map<number, number>();
-    for (const f of precipForecast) {
-      if (f.probability !== null) {
-        const hourKey = Math.round(f.timestamp.getTime() / HOUR_MS) * HOUR_MS;
-        forecastProbByHour.set(hourKey, f.probability);
-      }
-    }
-
-    // 降水グラフ用のデータ行を作成。予報確率は温度予報と同じシフト方式で
-    // 「その時刻の24時間後の予報値」を入れ、今後24時間の予報を24時間前〜現在に重ねる。
-    const precipHeader = ['時刻', '降水量(実績) (mm)'];
-    if (hasPrecipForecast) {
-      precipHeader.push('降水確率(予報) (%)');
-    }
-    const precipChartData: any[][] = [precipHeader];
-    const probsForStats: number[] = [];
-    let totalPrecip = 0;
-    let maxPrecip = 0;
-    let maxPrecipHour: Date | null = null;
-    let hasAnyActual = false;
-    for (let i = 0; i < precipHours.length; i++) {
-      const hour = precipHours[i];
-      const amount = precipActual[i].precipitation;
-      const row: any[] = [hour, amount !== null ? amount : null];
-      if (amount !== null) {
-        hasAnyActual = true;
-        totalPrecip += amount;
-        if (amount > maxPrecip) {
-          maxPrecip = amount;
-          maxPrecipHour = hour;
-        }
-      }
-      if (hasPrecipForecast) {
-        const targetHour = Math.round((hour.getTime() + shiftMs) / HOUR_MS) * HOUR_MS;
-        const prob = forecastProbByHour.get(targetHour);
-        row.push(prob !== undefined ? prob : null);
-        if (prob !== undefined) {
-          probsForStats.push(prob);
-        }
-      }
-      precipChartData.push(row);
-    }
-
-    // 降水量・降水確率のどちらも無ければ降水グラフは描かない
-    const hasPrecipData = hasAnyActual || hasPrecipForecast;
-    const precipNumCols = hasPrecipForecast ? 3 : 2;
-    // 温度ブロック（1〜numCols列）の右に1列空けて降水ブロックを置く
-    const precipStartCol = numCols + 2;
-    const precipViewMax = Math.max(Math.ceil(maxPrecip * 1.2), 5);
-
-    let precipSubtitle = `実績降水量: 合計 ${Math.round(totalPrecip * 10) / 10} mm`;
-    if (maxPrecipHour !== null) {
-      const maxPrecipTime = Utilities.formatDate(maxPrecipHour, Session.getScriptTimeZone(), 'M/d HH:mm');
-      precipSubtitle += ` / 最大 ${maxPrecip} mm (${maxPrecipTime})`;
-    }
-    if (hasPrecipForecast && probsForStats.length > 0) {
-      precipSubtitle += `   予報降水確率: 最大 ${Math.max(...probsForStats)}%`;
-    }
-
     // ここまでで必要なデータ取得が完了。書き込む直前に既存のグラフとデータを削除する
     // （途中でデータ取得が失敗してもグラフが消えないようにするため）
     const existingCharts = chartSheet.getCharts();
@@ -593,62 +516,14 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
 
     chartSheet.insertChart(chart);
 
-    // ---- 降水グラフ（2枚目、温度グラフの下）を描画（best-effort）----
-    if (hasPrecipData) {
-      // 降水ブロックを温度ブロックの右側（1列空けた位置）に書き込む
-      chartSheet.getRange(1, precipStartCol, precipChartData.length, precipNumCols)
-        .setValues(precipChartData);
-      chartSheet.getRange(2, precipStartCol, precipChartData.length - 1, 1)
-        .setNumberFormat('m/d hh:mm');
-      chartSheet.hideColumns(precipStartCol, precipNumCols);
-
-      const precipSeries: any = {
-        0: {
-          targetAxisIndex: 0,
-          color: '#4A90D9',
-          labelInLegend: '降水量(実績)'
-        }
-      };
-      const precipVAxes: any = {
-        0: {
-          title: '降水量 (mm)',
-          viewWindow: { min: 0, max: precipViewMax },
-          minorGridlines: { count: 4 }
-        }
-      };
-      if (hasPrecipForecast) {
-        precipSeries[1] = {
-          targetAxisIndex: 1,
-          color: '#9B59B6',
-          labelInLegend: '降水確率(予報)'
-        };
-        precipVAxes[1] = {
-          title: '降水確率 (%)',
-          viewWindow: { min: 0, max: 100 },
-          minorGridlines: { count: 4 }
-        };
-      }
-
-      const precipChart = chartSheet.newChart()
-        .setChartType(Charts.ChartType.COLUMN)
-        .addRange(chartSheet.getRange(1, precipStartCol, precipChartData.length, precipNumCols))
-        .setPosition(28, 1, 0, 0)
-        .setOption('title', `降水量(実績)・降水確率(予報)（最近2日間）- ${config.dataSheetName}`)
-        .setOption('subtitle', precipSubtitle)
-        .setOption('width', 1000)
-        .setOption('height', 500)
-        .setOption('hAxis', {
-          title: '時刻',
-          format: 'M/d HH:mm',
-          slantedText: true,
-          slantedTextAngle: 45
-        })
-        .setOption('series', precipSeries)
-        .setOption('vAxes', precipVAxes)
-        .setOption('legend', { position: 'bottom' })
-        .build();
-
-      chartSheet.insertChart(precipChart);
+    // ---- 降水グラフ（2枚目、温度グラフの下）を描画（best-effort・完全隔離）----
+    // 温度グラフを確定・挿入した「後」に実行し、独自の try/catch で囲う。
+    // これにより降水の取得・描画が失敗（例外・実行時間切れ等）しても、温度＋予報グラフは
+    // 必ず残る。降水は毎正時なので、温度グラフの密なセンサ時刻とは別に「1時間刻み」で描く。
+    try {
+      addPrecipitationChart(chartSheet, config, stationId, timestamps[0], numCols, HOUR_MS, shiftMs);
+    } catch (precipError) {
+      Logger.log(`${config.dataSheetName}: 降水グラフの描画をスキップしました（${precipError}）`);
     }
 
     Logger.log(`${config.dataSheetName}: グラフを更新しました（データ件数: ${recentData.length - 1}件）`);
@@ -658,6 +533,168 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
     Logger.log(`${config.dataSheetName}: エラー: ${error}`);
     return null;
   }
+}
+
+/**
+ * 「最近2日間」グラフの下に、降水量(実績)・降水確率(予報)の棒グラフを追加する。
+ *
+ * 呼び出し側で必ず try/catch し、失敗しても温度グラフに影響させないこと（best-effort）。
+ * データは温度ブロック（1〜numCols列）の右に1列空けて書き込み、COLUMN グラフを描く。
+ * 降水量も降水確率も得られなければ何もしない。
+ *
+ * @param chartSheet 描画先シート（温度データ・グラフは書き込み済み）
+ * @param config シート設定
+ * @param stationId アメダス観測所ID（温度と共通）
+ * @param firstTimestamp グラフ範囲の先頭時刻（センサ最古データ。正時に丸めて起点にする）
+ * @param numCols 温度ブロックの列数（この右に1列空けて降水ブロックを置く）
+ * @param HOUR_MS 1時間のミリ秒
+ * @param shiftMs 予報を重ねるシフト量（= FORECAST_HOURS_AHEAD 時間分。温度予報と共通）
+ */
+function addPrecipitationChart(
+  chartSheet: GoogleAppsScript.Spreadsheet.Sheet,
+  config: SheetConfig,
+  stationId: string,
+  firstTimestamp: Date,
+  numCols: number,
+  HOUR_MS: number,
+  shiftMs: number
+): void {
+  // 1時間刻みの時間軸（先頭時刻の正時 〜 現在の正時）を作る
+  const startHour = new Date(firstTimestamp);
+  startHour.setMinutes(0, 0, 0);
+  const endHour = new Date();
+  endHour.setMinutes(0, 0, 0);
+  const hours: Date[] = [];
+  for (let t = startHour.getTime(); t <= endHour.getTime(); t += HOUR_MS) {
+    hours.push(new Date(t));
+  }
+  if (hours.length === 0) {
+    return;
+  }
+
+  // 実績降水量（アメダス、温度と同じ観測所を再利用）
+  const precipActual = getPrecipitationWithCache(stationId, hours);
+
+  // 予報降水確率（Open-Meteo、今後24時間）を正時キーのMapにする
+  const precipForecast = getPrecipitationProbabilityForecast(config.postalCode, FORECAST_HOURS_AHEAD);
+  const hasPrecipForecast = precipForecast.length > 0;
+  const forecastProbByHour = new Map<number, number>();
+  for (const f of precipForecast) {
+    if (f.probability !== null) {
+      const hourKey = Math.round(f.timestamp.getTime() / HOUR_MS) * HOUR_MS;
+      forecastProbByHour.set(hourKey, f.probability);
+    }
+  }
+
+  // 降水グラフ用のデータ行を作成。予報確率は温度予報と同じシフト方式で
+  // 「その時刻の24時間後の予報値」を入れ、今後24時間の予報を24時間前〜現在に重ねる。
+  const precipHeader = ['時刻', '降水量(実績) (mm)'];
+  if (hasPrecipForecast) {
+    precipHeader.push('降水確率(予報) (%)');
+  }
+  const precipChartData: any[][] = [precipHeader];
+  const probsForStats: number[] = [];
+  let totalPrecip = 0;
+  let maxPrecip = 0;
+  let maxPrecipHour: Date | null = null;
+  let hasAnyActual = false;
+  for (let i = 0; i < hours.length; i++) {
+    const hour = hours[i];
+    const amount = precipActual[i].precipitation;
+    const row: any[] = [hour, amount !== null ? amount : null];
+    if (amount !== null) {
+      hasAnyActual = true;
+      totalPrecip += amount;
+      if (amount > maxPrecip) {
+        maxPrecip = amount;
+        maxPrecipHour = hour;
+      }
+    }
+    if (hasPrecipForecast) {
+      const targetHour = Math.round((hour.getTime() + shiftMs) / HOUR_MS) * HOUR_MS;
+      const prob = forecastProbByHour.get(targetHour);
+      row.push(prob !== undefined ? prob : null);
+      if (prob !== undefined) {
+        probsForStats.push(prob);
+      }
+    }
+    precipChartData.push(row);
+  }
+
+  // 降水量・降水確率のどちらも無ければ描かない
+  if (!hasAnyActual && !hasPrecipForecast) {
+    Logger.log(`${config.dataSheetName}: 降水データが無いため降水グラフはスキップ`);
+    return;
+  }
+
+  const precipNumCols = hasPrecipForecast ? 3 : 2;
+  // 温度ブロック（1〜numCols列）の右に1列空けて降水ブロックを置く
+  const precipStartCol = numCols + 2;
+  const precipViewMax = Math.max(Math.ceil(maxPrecip * 1.2), 5);
+
+  let precipSubtitle = `実績降水量: 合計 ${Math.round(totalPrecip * 10) / 10} mm`;
+  if (maxPrecipHour !== null) {
+    const maxPrecipTime = Utilities.formatDate(maxPrecipHour, Session.getScriptTimeZone(), 'M/d HH:mm');
+    precipSubtitle += ` / 最大 ${maxPrecip} mm (${maxPrecipTime})`;
+  }
+  if (hasPrecipForecast && probsForStats.length > 0) {
+    precipSubtitle += `   予報降水確率: 最大 ${Math.max(...probsForStats)}%`;
+  }
+
+  // 降水ブロックを書き込む
+  chartSheet.getRange(1, precipStartCol, precipChartData.length, precipNumCols)
+    .setValues(precipChartData);
+  chartSheet.getRange(2, precipStartCol, precipChartData.length - 1, 1)
+    .setNumberFormat('m/d hh:mm');
+  chartSheet.hideColumns(precipStartCol, precipNumCols);
+
+  const precipSeries: any = {
+    0: {
+      targetAxisIndex: 0,
+      color: '#4A90D9',
+      labelInLegend: '降水量(実績)'
+    }
+  };
+  const precipVAxes: any = {
+    0: {
+      title: '降水量 (mm)',
+      viewWindow: { min: 0, max: precipViewMax },
+      minorGridlines: { count: 4 }
+    }
+  };
+  if (hasPrecipForecast) {
+    precipSeries[1] = {
+      targetAxisIndex: 1,
+      color: '#9B59B6',
+      labelInLegend: '降水確率(予報)'
+    };
+    precipVAxes[1] = {
+      title: '降水確率 (%)',
+      viewWindow: { min: 0, max: 100 },
+      minorGridlines: { count: 4 }
+    };
+  }
+
+  const precipChart = chartSheet.newChart()
+    .setChartType(Charts.ChartType.COLUMN)
+    .addRange(chartSheet.getRange(1, precipStartCol, precipChartData.length, precipNumCols))
+    .setPosition(28, 1, 0, 0)
+    .setOption('title', `降水量(実績)・降水確率(予報)（最近2日間）- ${config.dataSheetName}`)
+    .setOption('subtitle', precipSubtitle)
+    .setOption('width', 1000)
+    .setOption('height', 500)
+    .setOption('hAxis', {
+      title: '時刻',
+      format: 'M/d HH:mm',
+      slantedText: true,
+      slantedTextAngle: 45
+    })
+    .setOption('series', precipSeries)
+    .setOption('vAxes', precipVAxes)
+    .setOption('legend', { position: 'bottom' })
+    .build();
+
+  chartSheet.insertChart(precipChart);
 }
 
 /**
@@ -942,37 +979,28 @@ function findNearestAmedasStation(lat: number, lon: number): AmedasStation {
 }
 
 /**
- * アメダスの毎正時 map JSON を取得する（実行内メモ付き）
+ * アメダスの毎正時 map JSON を取得する
  *
- * map/YYYYMMDDHH0000.json は全観測所の温度・降水量等をまとめて含むため、
- * 同一実行内で同じ時刻を何度も取得しないようメモ化する（温度と降水量で共用）。
+ * map/YYYYMMDDHH0000.json は全観測所の温度・降水量等をまとめて含む（1枚 約350KB）。
+ * 温度・降水量の両方から利用するが、メモ化はしない（1実行で複数枚を保持すると
+ * メモリ肥大の原因になるため。取得結果はそれぞれシートにキャッシュされる）。
  *
  * @param dateTimeStr YYYYMMDDHH0000 形式の文字列
  * @returns 観測所IDをキーとした map データ。取得失敗時は null
  */
-const _amedasMapMemo: { [dateTimeStr: string]: any } = {};
-
 function fetchAmedasMap(dateTimeStr: string): any | null {
-  if (Object.prototype.hasOwnProperty.call(_amedasMapMemo, dateTimeStr)) {
-    return _amedasMapMemo[dateTimeStr];
-  }
-
   try {
     const url = `https://www.jma.go.jp/bosai/amedas/data/map/${dateTimeStr}.json`;
     const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
 
     if (response.getResponseCode() !== 200) {
       Logger.log(`アメダスmap取得失敗: ${dateTimeStr}, HTTPステータス: ${response.getResponseCode()}`);
-      _amedasMapMemo[dateTimeStr] = null;
       return null;
     }
 
-    const json = JSON.parse(response.getContentText());
-    _amedasMapMemo[dateTimeStr] = json;
-    return json;
+    return JSON.parse(response.getContentText());
   } catch (error) {
     Logger.log(`アメダスmap取得エラー: ${dateTimeStr}, ${error}`);
-    _amedasMapMemo[dateTimeStr] = null;
     return null;
   }
 }
@@ -1356,6 +1384,13 @@ function getOutdoorTemperatureWithCache(
 const PRECIP_SHEET_NAME = '降水量データ';
 
 /**
+ * 降水量（実績）を1回の実行で API 取得する最大件数
+ * 初回はキャッシュが空で最大48h分が欠損するため、実行時間切れを避けて
+ * 数回の実行に分けて段階的に埋める。新しい時刻から優先取得する。
+ */
+const PRECIP_MAX_FETCH_PER_RUN = 24;
+
+/**
  * 降水量データ保存用シートを取得または作成
  */
 function getOrCreatePrecipSheet(): GoogleAppsScript.Spreadsheet.Sheet {
@@ -1511,7 +1546,18 @@ function getPrecipitationWithCache(
 
   // 欠けているデータをAPIから取得
   if (missingData.length > 0) {
-    const fetchedData = getPrecipitationHistory(stationId, missingData);
+    // 1回の実行で取得する件数を制限する（初回はキャッシュが空で最大48h分が欠損し、
+    // 全部取ると実行時間切れの恐れがある）。新しい時刻を優先して取得し、取得分は
+    // 都度保存するので、残りは次回以降の実行で段階的に埋まる。
+    const fetchTargets = missingData
+      .slice()
+      .sort((a, b) => b.getTime() - a.getTime())
+      .slice(0, PRECIP_MAX_FETCH_PER_RUN);
+    if (fetchTargets.length < missingData.length) {
+      Logger.log(`降水量: 欠損 ${missingData.length} 件のうち直近 ${fetchTargets.length} 件を取得（残りは次回以降）`);
+    }
+
+    const fetchedData = getPrecipitationHistory(stationId, fetchTargets);
 
     // 取得したデータをスプレッドシートに保存
     savePrecipitationData(stationId, fetchedData);
