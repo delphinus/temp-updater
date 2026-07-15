@@ -316,8 +316,9 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
       outdoorTemperatures.push(outdoorTemp !== null ? outdoorTemp : NaN);
     }
 
-    // 今後24時間の外気温予報を取得（取得失敗時は空配列 → 従来通り4列で描画）
-    const forecastData = getOutdoorForecast(config.postalCode, FORECAST_HOURS_AHEAD);
+    // 今後24時間の外気温予報を取得（取得失敗時は保存済み予報でフォールバック。
+    // それも無ければ空配列 → 従来通り4列で描画）
+    const forecastData = getOutdoorForecastWithFallback(config.postalCode, FORECAST_HOURS_AHEAD);
     const hasForecast = forecastData.length > 0;
     const numCols = hasForecast ? 5 : 4;
 
@@ -530,7 +531,7 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
 
     return dataGapInfo;
   } catch (error) {
-    Logger.log(`${config.dataSheetName}: エラー: ${error}`);
+    logBoth(`${config.dataSheetName}: エラー: ${error}`);
     return null;
   }
 }
@@ -576,7 +577,8 @@ function addPrecipitationChart(
   const precipActual = getPrecipitationWithCache(stationId, hours);
 
   // 予報降水確率（Open-Meteo、今後24時間）を正時キーのMapにする
-  const precipForecast = getPrecipitationProbabilityForecast(config.postalCode, FORECAST_HOURS_AHEAD);
+  // 取得失敗時は保存済み予報でフォールバック
+  const precipForecast = getPrecipitationProbabilityForecastWithFallback(config.postalCode, FORECAST_HOURS_AHEAD);
   const hasPrecipForecast = precipForecast.length > 0;
   const forecastProbByHour = new Map<number, number>();
   for (const f of precipForecast) {
@@ -2197,6 +2199,239 @@ function getDailyOutdoorTemperature(stationId: string, date: Date): { max: numbe
 }
 
 // ========================================
+// 共通ユーティリティ（ログ・HTTP リトライ）
+// ========================================
+
+/**
+ * Logger.log と console.log の両方に出力する。
+ *
+ * Logger.log は Apps Script の実行トランスクリプト（エディタ「実行数」）にしか出ず、
+ * Cloud Logging には流れない。console.log は標準 GCP プロジェクトの Cloud Logging に
+ * 流れるため、外部（clasp logs / gcloud logging）から追える。両方に出して観測性を確保する。
+ */
+function logBoth(message: string): void {
+  Logger.log(message);
+  console.log(message);
+}
+
+/**
+ * UrlFetchApp.fetch を、429 / 5xx のときだけ指数バックオフで再試行するラッパー。
+ *
+ * Open-Meteo は GAS の共有送信元 IP 経由だと一時的に 429（レート制限）を返すことがある。
+ * 一過性の失敗を吸収するため軽くリトライする。200 以外でも最終応答をそのまま返すので、
+ * 呼び出し側は従来どおり getResponseCode() を見てハンドルすること。
+ *
+ * @param url 取得先 URL
+ * @param options fetch オプション（muteHttpExceptions: true 前提）
+ * @param maxRetries 最大リトライ回数
+ */
+function fetchWithRetry(
+  url: string,
+  options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions,
+  maxRetries: number
+): GoogleAppsScript.URL_Fetch.HTTPResponse {
+  let response = UrlFetchApp.fetch(url, options);
+  let attempt = 0;
+  while (response.getResponseCode() !== 200 && attempt < maxRetries) {
+    const code = response.getResponseCode();
+    // リトライ対象は 429（レート制限）と 5xx（サーバ側一時障害）のみ
+    if (code !== 429 && code < 500) {
+      break;
+    }
+    attempt++;
+    Utilities.sleep(1000 * attempt); // 1s, 2s, ... のバックオフ
+    logBoth(`HTTP ${code} を受信、リトライします（${attempt}/${maxRetries}）: ${url}`);
+    response = UrlFetchApp.fetch(url, options);
+  }
+  return response;
+}
+
+// ========================================
+// 予報データのシートキャッシュ（取得失敗時のフォールバック用）
+// ========================================
+
+/**
+ * 外気温予報のキャッシュ用シート名
+ */
+const OUTDOOR_FORECAST_SHEET_NAME = '外気温予報データ';
+
+/**
+ * 降水確率予報のキャッシュ用シート名
+ */
+const PRECIP_FORECAST_SHEET_NAME = '降水確率予報データ';
+
+/**
+ * 予報キャッシュ用シートを取得または作成（列: タイムスタンプ / 郵便番号 / 値）
+ * @param sheetName シート名
+ * @param valueLabel 3列目のヘッダーラベル（例: 気温 / 降水確率）
+ */
+function getOrCreateForecastSheet(
+  sheetName: string,
+  valueLabel: string
+): GoogleAppsScript.Spreadsheet.Sheet {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = spreadsheet.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(sheetName);
+    sheet.getRange(1, 1, 1, 3).setValues([['タイムスタンプ', '郵便番号', valueLabel]]);
+    sheet.getRange(1, 1, 1, 3).setFontWeight('bold');
+  }
+  return sheet;
+}
+
+/**
+ * 予報値をシートに保存する（郵便番号＋正時をキーに、最新の予報値で上書き）。
+ *
+ * 予報値は取得のたびに更新（改定）されるので、実測データと違い append ではなく upsert する。
+ * 3日より古い行は削除して肥大を防ぐ。他の郵便番号の行は保持する。
+ *
+ * @param sheetName シート名
+ * @param valueLabel 3列目のヘッダーラベル
+ * @param postalCode 郵便番号（この呼び出しで更新する対象）
+ * @param data 保存する予報データ（value が null の要素は無視）
+ */
+function saveForecastData(
+  sheetName: string,
+  valueLabel: string,
+  postalCode: string,
+  data: Array<{ timestamp: Date; value: number | null }>
+): void {
+  const sheet = getOrCreateForecastSheet(sheetName, valueLabel);
+  const HOUR_MS = 60 * 60 * 1000;
+
+  // 既存行（全郵便番号）を「郵便番号_正時」キーの Map に読み込む
+  const allData = sheet.getDataRange().getValues();
+  const map = new Map<string, [Date, string, number]>();
+  for (let i = 1; i < allData.length; i++) {
+    const row = allData[i];
+    const ts = new Date(row[0]);
+    if (isNaN(ts.getTime())) continue;
+    const pc = String(row[1]);
+    const v = Number(row[2]);
+    if (!pc || isNaN(v)) continue;
+    const hourKey = Math.round(ts.getTime() / HOUR_MS) * HOUR_MS;
+    map.set(`${pc}_${hourKey}`, [new Date(hourKey), pc, v]);
+  }
+
+  // 今回取得分で upsert（同一郵便番号・同一正時は上書き）
+  for (const d of data) {
+    if (d.value === null || d.value === undefined) continue;
+    const hourKey = Math.round(d.timestamp.getTime() / HOUR_MS) * HOUR_MS;
+    map.set(`${postalCode}_${hourKey}`, [new Date(hourKey), postalCode, d.value]);
+  }
+
+  // 3日より古い行を削除し、時刻順に並べる
+  const cutoff = new Date().getTime() - 3 * 24 * HOUR_MS;
+  const rows = Array.from(map.values())
+    .filter(row => row[0].getTime() >= cutoff)
+    .sort((a, b) => a[0].getTime() - b[0].getTime());
+
+  sheet.clear();
+  sheet.getRange(1, 1, 1, 3).setValues([['タイムスタンプ', '郵便番号', valueLabel]]);
+  sheet.getRange(1, 1, 1, 3).setFontWeight('bold');
+  if (rows.length > 0) {
+    sheet.getRange(2, 1, rows.length, 3).setValues(rows);
+  }
+}
+
+/**
+ * シートに保存済みの予報値を、正時(ms)→値の Map として読み込む。
+ * @param sheetName シート名
+ * @param postalCode 郵便番号（この郵便番号の行だけ返す）
+ */
+function loadForecastData(sheetName: string, postalCode: string): Map<number, number> {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = spreadsheet.getSheetByName(sheetName);
+  const map = new Map<number, number>();
+  if (!sheet) return map;
+
+  const HOUR_MS = 60 * 60 * 1000;
+  const allData = sheet.getDataRange().getValues();
+  for (let i = 1; i < allData.length; i++) {
+    const row = allData[i];
+    const ts = new Date(row[0]);
+    if (isNaN(ts.getTime())) continue;
+    const pc = String(row[1]);
+    const v = Number(row[2]);
+    if (pc !== postalCode || isNaN(v)) continue;
+    map.set(Math.round(ts.getTime() / HOUR_MS) * HOUR_MS, v);
+  }
+  return map;
+}
+
+/**
+ * 外気温予報を取得し、成功時はシートに保存、失敗時は保存済み予報でフォールバックする。
+ * 呼び出し側は従来の getOutdoorForecast と同じ形の配列を受け取れる。
+ */
+function getOutdoorForecastWithFallback(postalCode: string, hoursAhead: number): TemperatureData[] {
+  const fresh = getOutdoorForecast(postalCode, hoursAhead);
+  if (fresh.length > 0) {
+    try {
+      saveForecastData(
+        OUTDOOR_FORECAST_SHEET_NAME,
+        '気温',
+        postalCode,
+        fresh.map(f => ({ timestamp: f.timestamp, value: f.temperature }))
+      );
+    } catch (e) {
+      logBoth(`外気温予報の保存に失敗: ${e}`);
+    }
+    return fresh;
+  }
+
+  // ライブ取得が失敗（空）→ 保存済み予報でフォールバック
+  const saved = loadForecastData(OUTDOOR_FORECAST_SHEET_NAME, postalCode);
+  const now = new Date().getTime();
+  const to = now + hoursAhead * 60 * 60 * 1000;
+  const results: TemperatureData[] = [];
+  for (const [hourKey, temp] of saved) {
+    if (hourKey > now && hourKey <= to) {
+      results.push({ timestamp: new Date(hourKey), temperature: temp });
+    }
+  }
+  results.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+  logBoth(`外気温予報: ライブ取得に失敗、保存済み ${results.length} 件でフォールバック（郵便番号: ${postalCode}）`);
+  return results;
+}
+
+/**
+ * 降水確率予報を取得し、成功時はシートに保存、失敗時は保存済み予報でフォールバックする。
+ */
+function getPrecipitationProbabilityForecastWithFallback(
+  postalCode: string,
+  hoursAhead: number
+): PrecipitationProbabilityData[] {
+  const fresh = getPrecipitationProbabilityForecast(postalCode, hoursAhead);
+  if (fresh.length > 0) {
+    try {
+      saveForecastData(
+        PRECIP_FORECAST_SHEET_NAME,
+        '降水確率',
+        postalCode,
+        fresh.map(f => ({ timestamp: f.timestamp, value: f.probability }))
+      );
+    } catch (e) {
+      logBoth(`降水確率予報の保存に失敗: ${e}`);
+    }
+    return fresh;
+  }
+
+  // ライブ取得が失敗（空）→ 保存済み予報でフォールバック
+  const saved = loadForecastData(PRECIP_FORECAST_SHEET_NAME, postalCode);
+  const now = new Date().getTime();
+  const to = now + hoursAhead * 60 * 60 * 1000;
+  const results: PrecipitationProbabilityData[] = [];
+  for (const [hourKey, prob] of saved) {
+    if (hourKey > now && hourKey <= to) {
+      results.push({ timestamp: new Date(hourKey), probability: prob });
+    }
+  }
+  results.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+  logBoth(`降水確率予報: ライブ取得に失敗、保存済み ${results.length} 件でフォールバック（郵便番号: ${postalCode}）`);
+  return results;
+}
+
+// ========================================
 // 外気温予報データの取得機能（Open-Meteo）
 // ========================================
 
@@ -2227,10 +2462,10 @@ function getOutdoorForecast(postalCode: string, hoursAhead: number): Temperature
       '&models=jma_seamless' +
       '&timeformat=unixtime';
 
-    const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    const response = fetchWithRetry(url, { muteHttpExceptions: true }, 2);
 
     if (response.getResponseCode() !== 200) {
-      Logger.log(`外気温予報の取得失敗: HTTPステータス ${response.getResponseCode()}`);
+      logBoth(`外気温予報の取得失敗: HTTPステータス ${response.getResponseCode()}`);
       return [];
     }
 
@@ -2261,7 +2496,7 @@ function getOutdoorForecast(postalCode: string, hoursAhead: number): Temperature
     Logger.log(`外気温予報を取得しました（${results.length}件、郵便番号: ${postalCode}）`);
     return results;
   } catch (error) {
-    Logger.log(`外気温予報の取得エラー: ${error}`);
+    logBoth(`外気温予報の取得エラー: ${error}`);
     return [];
   }
 }
@@ -2295,10 +2530,10 @@ function getPrecipitationProbabilityForecast(
       '&forecast_days=2' +
       '&timeformat=unixtime';
 
-    const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    const response = fetchWithRetry(url, { muteHttpExceptions: true }, 2);
 
     if (response.getResponseCode() !== 200) {
-      Logger.log(`降水確率予報の取得失敗: HTTPステータス ${response.getResponseCode()}`);
+      logBoth(`降水確率予報の取得失敗: HTTPステータス ${response.getResponseCode()}`);
       return [];
     }
 
@@ -2329,7 +2564,7 @@ function getPrecipitationProbabilityForecast(
     Logger.log(`降水確率予報を取得しました（${results.length}件、郵便番号: ${postalCode}）`);
     return results;
   } catch (error) {
-    Logger.log(`降水確率予報の取得エラー: ${error}`);
+    logBoth(`降水確率予報の取得エラー: ${error}`);
     return [];
   }
 }
