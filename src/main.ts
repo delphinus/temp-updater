@@ -594,8 +594,16 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
         format: 'M/d HH:mm',
         slantedText: true,
         slantedTextAngle: 45,
+        // 横軸（連続時間軸）の目盛りを6時間毎にする。
+        // units.hours.interval に候補間隔を渡すと、その中から選ばれる（[6]で6時間固定）。
+        gridlines: {
+          units: {
+            days: { format: ['M/d'] },
+            hours: { format: ['M/d HH:mm', 'HH:mm'], interval: [6] }
+          }
+        },
         minorGridlines: {
-          count: 5
+          count: 0
         }
       })
       .setOption('series', seriesConfig)
