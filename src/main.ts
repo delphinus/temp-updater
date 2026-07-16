@@ -540,20 +540,22 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
       };
     }
     if (hasPrecipForecast) {
-      // 降水確率(予報)は棒グラフ。埋め込みCOMBOは第3軸(targetAxisIndex:2)を確実に
-      // 描けず棒が温度軸に落ちて突き抜けるため、湿度と同じ右軸(%)に相乗りさせる
-      // （どちらも%なので軸を共有でき、0〜100に収まる）。雨らしい青で区別する。
+      // 降水確率(予報)はエリア(面)。棒(bars)にすると横軸がカテゴリ軸になり
+      // 6時間毎の目盛り指定(hAxis.ticks)が効かなくなるため、連続軸を保てる面にする。
+      // 湿度と同じ右軸(%)に相乗り（どちらも%で0〜100に収まる）。雨らしい青で塗る。
       seriesConfig[precipSeriesIndex] = {
-        type: 'bars',
+        type: 'area',
         targetAxisIndex: 1,
         color: '#AED6F1',
+        areaOpacity: 0.5,
+        lineWidth: 0,
+        pointSize: 0,
         labelInLegend: '降水確率(予報)'
       };
     }
 
-    // 縦軸: 0=温度(左) / 1=湿度(右) / 2=降水確率(右, 予報がある場合のみ)
     // 縦軸: 0=温度(左) / 1=右(%)。降水確率(予報)がある回は右軸を湿度と共有して
-    // 0〜100 固定にする（棒が突き抜けないよう）。予報が無い回は従来どおり湿度にズーム。
+    // 0〜100 固定にする（エリアが突き抜けないよう）。予報が無い回は従来どおり湿度にズーム。
     const vAxes: any = {
       0: {
         title: '温度 (℃)',
@@ -588,7 +590,24 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
           }
     };
 
-    // グラフを作成（線と棒を混在させるため COMBO。既定は線で、降水確率のみ棒）
+    // 横軸（連続時間軸）の目盛りを6時間毎（JSTの0/6/12/18時）に固定する。
+    // 降水確率をエリアにしたことで連続軸になり、hAxis.ticks（Date配列）が効く。
+    const SIX_HOURS_MS = 6 * HOUR_MS;
+    const axisStartMs = chartTimestamps[0].getTime();
+    const axisEndMs = chartTimestamps[chartTimestamps.length - 1].getTime();
+    const firstTick = new Date(axisStartMs);
+    firstTick.setMinutes(0, 0, 0);
+    firstTick.setHours(firstTick.getHours() - (firstTick.getHours() % 6)); // 直前の6時間境界(JST)に丸める
+    let tickMs = firstTick.getTime();
+    if (tickMs < axisStartMs) {
+      tickMs += SIX_HOURS_MS; // 範囲開始以降の最初の境界から
+    }
+    const hAxisTicks: Date[] = [];
+    for (; tickMs <= axisEndMs; tickMs += SIX_HOURS_MS) {
+      hAxisTicks.push(new Date(tickMs));
+    }
+
+    // グラフを作成（線とエリアを混在させるため COMBO。既定は線で、降水確率のみエリア）
     const chart = chartSheet.newChart()
       .setChartType(Charts.ChartType.COMBO)
       .addRange(chartSheet.getRange(1, 1, chartData.length, numCols))
@@ -603,8 +622,8 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
         format: 'M/d HH:mm',
         slantedText: true,
         slantedTextAngle: 45,
-        // 横軸はカテゴリ（毎正時グリッド）なので、6行(=6時間)毎にラベルを表示する
-        showTextEvery: 6,
+        // 連続軸に6時間境界のDateを明示指定して目盛りを6時間毎にする
+        ticks: hAxisTicks,
         minorGridlines: {
           count: 0
         }
