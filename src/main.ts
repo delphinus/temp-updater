@@ -300,23 +300,34 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
     // 予報は毎正時のデータなので、正時のタイムスタンプ（ミリ秒）をキーにしたMapにする
     const HOUR_MS = 60 * 60 * 1000;
 
-    // 室内センサーが止まっていても、外気温（実測）・予報は現在まで取得できる。
-    // 最後のセンサー時刻より後の「毎正時」の行を補完してグラフを現在まで伸ばす。
-    // これらの行は室内温度・湿度を空（null）にし、外気温・予報だけを載せる。
-    // センサーが正常に流れているときは補完行が 0 件になり、既存挙動と変わらない。
-    const extensionTimestamps: Date[] = [];
-    {
-      const lastHour = new Date(latestTimestamp);
-      lastHour.setMinutes(0, 0, 0);
-      const nowMs = new Date().getTime();
-      for (let t = lastHour.getTime() + HOUR_MS; t <= nowMs; t += HOUR_MS) {
-        extensionTimestamps.push(new Date(t));
-      }
+    // 横軸は「毎正時の完全なグリッド」にする。センサーは毎正時記録なので、欠測した
+    // 時間帯（途中でも末尾でも）には空の行を補完し、そこへ外気温（実測）・予報を
+    // 載せることで、室内データが途切れてもグラフが途切れず現在まで伸びる。
+    // 降水確率の棒を含む COMBO は横軸がカテゴリ扱いになるため、毎正時で等間隔に
+    // 並べておくと目盛りの間引き（hAxis.showTextEvery）も効く。
+    // JST は UTC+9（整数時）なので、エポックミリ秒を HOUR_MS で丸めれば正時境界に一致する。
+    const hourFloor = (ms: number): number => ms - (ms % HOUR_MS);
+
+    // センサー値を正時キーで引けるようにする（同一正時に複数あれば後勝ち）
+    const sensorByHour = new Map<number, { temp: number; humidity: number }>();
+    for (let i = 0; i < timestamps.length; i++) {
+      sensorByHour.set(hourFloor(timestamps[i].getTime()), { temp: dataRows[i][1], humidity: dataRows[i][2] });
     }
 
-    // チャートの時間軸 = 室内センサー時刻 + 補完の毎正時。昇順を保つ（補完分は最後の
-    // センサー時刻より後）。外気温（実測）はこの全時刻分を取得する。
-    const chartTimestamps: Date[] = [...timestamps, ...extensionTimestamps];
+    // 最初のセンサー時刻の正時 〜 現在の正時までを 1 時間刻みで生成
+    const gridStart = hourFloor(timestamps[0].getTime());
+    const gridEnd = hourFloor(new Date().getTime());
+    const chartTimestamps: Date[] = [];
+    const gridIndoorTemps: Array<number | null> = [];
+    const gridHumidities: Array<number | null> = [];
+    for (let h = gridStart; h <= gridEnd; h += HOUR_MS) {
+      chartTimestamps.push(new Date(h));
+      const s = sensorByHour.get(h);
+      gridIndoorTemps.push(s ? s.temp : null);
+      gridHumidities.push(s ? s.humidity : null);
+    }
+    // 室内データが無く外気温・予報で補完した時間数（サブタイトル・ログ用）
+    const filledCount = gridIndoorTemps.filter(v => v === null).length;
 
     // 外気温データを取得（スプレッドシートキャッシュ優先）
     const stationId = getAmedasStationId(config.postalCode);
@@ -419,10 +430,9 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
     const shiftMs = FORECAST_HOURS_AHEAD * HOUR_MS;
     for (let i = 0; i < chartTimestamps.length; i++) {
       const timestamp = chartTimestamps[i];
-      // i < dataRows.length は室内センサー行、それ以降は欠測補完行（室内は空）
-      const isSensorRow = i < dataRows.length;
-      const indoorTemp = isSensorRow ? dataRows[i][1] : null;
-      const humidity = isSensorRow ? dataRows[i][2] : null;
+      // グリッド上の室内温度・湿度（欠測時間は null）。外気温・予報は毎正時で載る。
+      const indoorTemp = gridIndoorTemps[i];
+      const humidity = gridHumidities[i];
       const outdoorTemp = outdoorTemperatures[i];
       const targetHour = Math.round((timestamp.getTime() + shiftMs) / HOUR_MS) * HOUR_MS;
       const row: any[] = [timestamp, indoorTemp, humidity, isNaN(outdoorTemp) ? null : outdoorTemp];
@@ -463,10 +473,9 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
       subtitle += `   予報降水確率: 最大 ${Math.max(...forecastProbs)}%`;
     }
 
-    // 室内データが欠測していて外気温・予報で現在まで補完した場合は、その旨を明示する
-    if (extensionTimestamps.length > 0) {
-      const lastIndoorTime = Utilities.formatDate(latestTimestamp, Session.getScriptTimeZone(), 'M/d HH:mm');
-      subtitle += `   ※室内データは ${lastIndoorTime} 以降欠測（外気温・予報で継続）`;
+    // 室内データが欠測していて外気温・予報で補完した場合は、その旨を明示する
+    if (filledCount > 0) {
+      subtitle += `   ※室内データ欠測 ${filledCount} 時間分は外気温・予報で継続`;
     }
 
     // ここまでで必要なデータ取得が完了。書き込む直前に既存のグラフとデータを削除する
@@ -579,24 +588,6 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
           }
     };
 
-    // 横軸の目盛りを6時間毎（0/6/12/18時）に固定する。
-    // 埋め込みグラフは gridlines.units.hours.interval を無視するため、
-    // データ範囲内の6時間境界の Date を明示的な ticks として渡す。
-    const SIX_HOURS_MS = 6 * HOUR_MS;
-    const axisStartMs = chartTimestamps[0].getTime();
-    const axisEndMs = chartTimestamps[chartTimestamps.length - 1].getTime();
-    const firstTick = new Date(axisStartMs);
-    firstTick.setMinutes(0, 0, 0);
-    firstTick.setHours(firstTick.getHours() - (firstTick.getHours() % 6)); // 直前の6時間境界に丸める
-    let tickMs = firstTick.getTime();
-    if (tickMs < axisStartMs) {
-      tickMs += SIX_HOURS_MS; // 範囲開始以降の最初の境界から
-    }
-    const hAxisTicks: Date[] = [];
-    for (; tickMs <= axisEndMs; tickMs += SIX_HOURS_MS) {
-      hAxisTicks.push(new Date(tickMs));
-    }
-
     // グラフを作成（線と棒を混在させるため COMBO。既定は線で、降水確率のみ棒）
     const chart = chartSheet.newChart()
       .setChartType(Charts.ChartType.COMBO)
@@ -612,8 +603,8 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
         format: 'M/d HH:mm',
         slantedText: true,
         slantedTextAngle: 45,
-        // 6時間境界の Date を明示指定して目盛りを6時間毎にする
-        ticks: hAxisTicks,
+        // 横軸はカテゴリ（毎正時グリッド）なので、6行(=6時間)毎にラベルを表示する
+        showTextEvery: 6,
         minorGridlines: {
           count: 0
         }
@@ -626,10 +617,8 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
 
     chartSheet.insertChart(chart);
 
-    const extensionNote = extensionTimestamps.length > 0
-      ? `（室内 ${dataRows.length}件 + 補完 ${extensionTimestamps.length}件）`
-      : '';
-    Logger.log(`${config.dataSheetName}: グラフを更新しました（データ件数: ${recentData.length - 1}件）${extensionNote}`);
+    const gapNote = filledCount > 0 ? `（室内欠測補完 ${filledCount}件）` : '';
+    Logger.log(`${config.dataSheetName}: グラフを更新しました（データ件数: ${recentData.length - 1}件）${gapNote}`);
 
     return dataGapInfo;
   } catch (error) {
