@@ -297,19 +297,48 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
       timestamps.push(timestamp);
     }
 
+    // 予報は毎正時のデータなので、正時のタイムスタンプ（ミリ秒）をキーにしたMapにする
+    const HOUR_MS = 60 * 60 * 1000;
+
+    // 横軸は「毎正時の完全なグリッド」にする。センサーは毎正時記録なので、欠測した
+    // 時間帯（途中でも末尾でも）には空の行を補完し、そこへ外気温（実測）・予報を
+    // 載せることで、室内データが途切れてもグラフが途切れず現在まで伸びる。
+    // 降水確率の棒を含む COMBO は横軸がカテゴリ扱いになるため、毎正時で等間隔に
+    // 並べておくと目盛りの間引き（hAxis.showTextEvery）も効く。
+    // JST は UTC+9（整数時）なので、エポックミリ秒を HOUR_MS で丸めれば正時境界に一致する。
+    const hourFloor = (ms: number): number => ms - (ms % HOUR_MS);
+
+    // センサー値を正時キーで引けるようにする（同一正時に複数あれば後勝ち）
+    const sensorByHour = new Map<number, { temp: number; humidity: number }>();
+    for (let i = 0; i < timestamps.length; i++) {
+      sensorByHour.set(hourFloor(timestamps[i].getTime()), { temp: dataRows[i][1], humidity: dataRows[i][2] });
+    }
+
+    // 最初のセンサー時刻の正時 〜 現在の正時までを 1 時間刻みで生成
+    const gridStart = hourFloor(timestamps[0].getTime());
+    const gridEnd = hourFloor(new Date().getTime());
+    const chartTimestamps: Date[] = [];
+    const gridIndoorTemps: Array<number | null> = [];
+    const gridHumidities: Array<number | null> = [];
+    for (let h = gridStart; h <= gridEnd; h += HOUR_MS) {
+      chartTimestamps.push(new Date(h));
+      const s = sensorByHour.get(h);
+      gridIndoorTemps.push(s ? s.temp : null);
+      gridHumidities.push(s ? s.humidity : null);
+    }
+    // 室内データが無く外気温・予報で補完した時間数（サブタイトル・ログ用）
+    const filledCount = gridIndoorTemps.filter(v => v === null).length;
+
     // 外気温データを取得（スプレッドシートキャッシュ優先）
     const stationId = getAmedasStationId(config.postalCode);
-    const outdoorTempData = getOutdoorTemperatureWithCache(stationId, timestamps);
+    const outdoorTempData = getOutdoorTemperatureWithCache(stationId, chartTimestamps);
     const outdoorTemperatures: number[] = [];
 
-    // 外気温をdataRowsに追加
-    for (let i = 0; i < dataRows.length; i++) {
+    // 外気温を chartTimestamps と並行の配列にする
+    for (let i = 0; i < chartTimestamps.length; i++) {
       const outdoorTemp = outdoorTempData[i].temperature;
       outdoorTemperatures.push(outdoorTemp !== null ? outdoorTemp : NaN);
     }
-
-    // 予報は毎正時のデータなので、正時のタイムスタンプ（ミリ秒）をキーにしたMapにする
-    const HOUR_MS = 60 * 60 * 1000;
 
     // 今後24時間の外気温予報を取得（取得失敗時は保存済み予報でフォールバック。
     // それも無ければ空配列 → 予報列なしで描画）
@@ -399,11 +428,21 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
     // 実測（今日）と予報（翌日同時刻）を比較できる。予報を実測と同じ行に持たせるので、
     // 行が交互にならず折れ線が途切れない（直近24時間の実測行にのみ予報値が入る）。
     const shiftMs = FORECAST_HOURS_AHEAD * HOUR_MS;
-    for (let i = 0; i < dataRows.length; i++) {
-      const [timestamp, indoorTemp, humidity] = dataRows[i];
+    for (let i = 0; i < chartTimestamps.length; i++) {
+      const timestamp = chartTimestamps[i];
+      // 横軸ラベルは文字列にして 6 時間毎（JSTの0/6/12/18時）だけ表示、他は空白にする。
+      // 降水確率の棒を含む COMBO はカテゴリ軸（1行=1スロット）になり、ticks 等の
+      // 間引きが効かないため、ラベル文字列そのものを間引く。グリッドは毎正時なので
+      // 6 時間境界の行だけに時刻を入れれば 6 時間毎の目盛りになる。
+      const label = timestamp.getHours() % 6 === 0
+        ? Utilities.formatDate(timestamp, Session.getScriptTimeZone(), 'M/d HH:mm')
+        : '';
+      // グリッド上の室内温度・湿度（欠測時間は null）。外気温・予報は毎正時で載る。
+      const indoorTemp = gridIndoorTemps[i];
+      const humidity = gridHumidities[i];
       const outdoorTemp = outdoorTemperatures[i];
       const targetHour = Math.round((timestamp.getTime() + shiftMs) / HOUR_MS) * HOUR_MS;
-      const row: any[] = [timestamp, indoorTemp, humidity, isNaN(outdoorTemp) ? null : outdoorTemp];
+      const row: any[] = [label, indoorTemp, humidity, isNaN(outdoorTemp) ? null : outdoorTemp];
       if (hasForecast) {
         const fcst = forecastByHour.get(targetHour);
         row.push(fcst !== undefined ? fcst : null);
@@ -424,8 +463,10 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
     let subtitle = `室内: 最低 ${indoorTempMin}℃ (${indoorTempMinTime}) / 最高 ${indoorTempMax}℃ (${indoorTempMaxTime})   湿度: 最低 ${humidityMin}% (${humidityMinTime}) / 最高 ${humidityMax}% (${humidityMaxTime})`;
 
     if (outdoorTempMin !== null && outdoorTempMax !== null && outdoorTempMinIndex >= 0 && outdoorTempMaxIndex >= 0) {
-      const outdoorTempMinTime = Utilities.formatDate(timestamps[outdoorTempMinIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
-      const outdoorTempMaxTime = Utilities.formatDate(timestamps[outdoorTempMaxIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
+      // 外気温の min/max インデックスは chartTimestamps（補完行を含む）と並行なので
+      // 時刻ラベルも chartTimestamps を参照する
+      const outdoorTempMinTime = Utilities.formatDate(chartTimestamps[outdoorTempMinIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
+      const outdoorTempMaxTime = Utilities.formatDate(chartTimestamps[outdoorTempMaxIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
       subtitle += `   外気: 最低 ${outdoorTempMin}℃ (${outdoorTempMinTime}) / 最高 ${outdoorTempMax}℃ (${outdoorTempMaxTime})`;
     }
 
@@ -439,6 +480,11 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
       subtitle += `   予報降水確率: 最大 ${Math.max(...forecastProbs)}%`;
     }
 
+    // 室内データが欠測していて外気温・予報で補完した場合は、その旨を明示する
+    if (filledCount > 0) {
+      subtitle += `   ※室内データ欠測 ${filledCount} 時間分は外気温・予報で継続`;
+    }
+
     // ここまでで必要なデータ取得が完了。書き込む直前に既存のグラフとデータを削除する
     // （途中でデータ取得が失敗してもグラフが消えないようにするため）
     const existingCharts = chartSheet.getCharts();
@@ -449,9 +495,7 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
     const dataRange = chartSheet.getRange(1, 1, chartData.length, numCols);
     dataRange.setValues(chartData);
 
-    // タイムスタンプ列のフォーマット設定
-    chartSheet.getRange(2, 1, chartData.length - 1, 1)
-      .setNumberFormat('m/d hh:mm');
+    // 列0（時刻ラベル）は文字列なので数値フォーマットは不要（6時間毎のみ非空文字）
 
     // データ列を非表示にする
     chartSheet.hideColumns(1, numCols);
@@ -501,9 +545,9 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
       };
     }
     if (hasPrecipForecast) {
-      // 降水確率(予報)は棒グラフ。埋め込みCOMBOは第3軸(targetAxisIndex:2)を確実に
-      // 描けず棒が温度軸に落ちて突き抜けるため、湿度と同じ右軸(%)に相乗りさせる
-      // （どちらも%なので軸を共有でき、0〜100に収まる）。雨らしい青で区別する。
+      // 降水確率(予報)は棒。COMBO はカテゴリ軸になるが、横軸ラベルを文字列側で
+      // 6時間毎に間引くので目盛りは6時間毎になる。湿度と同じ右軸(%)に相乗りさせる
+      // （どちらも%で0〜100に収まる）。雨らしい青で区別する。
       seriesConfig[precipSeriesIndex] = {
         type: 'bars',
         targetAxisIndex: 1,
@@ -512,9 +556,8 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
       };
     }
 
-    // 縦軸: 0=温度(左) / 1=湿度(右) / 2=降水確率(右, 予報がある場合のみ)
     // 縦軸: 0=温度(左) / 1=右(%)。降水確率(予報)がある回は右軸を湿度と共有して
-    // 0〜100 固定にする（棒が突き抜けないよう）。予報が無い回は従来どおり湿度にズーム。
+    // 0〜100 固定にする（エリアが突き抜けないよう）。予報が無い回は従来どおり湿度にズーム。
     const vAxes: any = {
       0: {
         title: '温度 (℃)',
@@ -549,7 +592,8 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
           }
     };
 
-    // グラフを作成（線と棒を混在させるため COMBO。既定は線で、降水確率のみ棒）
+    // グラフを作成（線と棒を混在させるため COMBO。既定は線で、降水確率のみ棒）。
+    // 横軸は列0の文字列ラベル（6時間毎のみ非空）で間引くので、ticks は使わない。
     const chart = chartSheet.newChart()
       .setChartType(Charts.ChartType.COMBO)
       .addRange(chartSheet.getRange(1, 1, chartData.length, numCols))
@@ -565,7 +609,7 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
         slantedText: true,
         slantedTextAngle: 45,
         minorGridlines: {
-          count: 5
+          count: 0
         }
       })
       .setOption('series', seriesConfig)
@@ -576,7 +620,8 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
 
     chartSheet.insertChart(chart);
 
-    Logger.log(`${config.dataSheetName}: グラフを更新しました（データ件数: ${recentData.length - 1}件）`);
+    const gapNote = filledCount > 0 ? `（室内欠測補完 ${filledCount}件）` : '';
+    Logger.log(`${config.dataSheetName}: グラフを更新しました（データ件数: ${recentData.length - 1}件）${gapNote}`);
 
     return dataGapInfo;
   } catch (error) {
