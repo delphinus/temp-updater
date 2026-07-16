@@ -430,12 +430,19 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
     const shiftMs = FORECAST_HOURS_AHEAD * HOUR_MS;
     for (let i = 0; i < chartTimestamps.length; i++) {
       const timestamp = chartTimestamps[i];
+      // 横軸ラベルは文字列にして 6 時間毎（JSTの0/6/12/18時）だけ表示、他は空白にする。
+      // 降水確率の棒を含む COMBO はカテゴリ軸（1行=1スロット）になり、ticks 等の
+      // 間引きが効かないため、ラベル文字列そのものを間引く。グリッドは毎正時なので
+      // 6 時間境界の行だけに時刻を入れれば 6 時間毎の目盛りになる。
+      const label = timestamp.getHours() % 6 === 0
+        ? Utilities.formatDate(timestamp, Session.getScriptTimeZone(), 'M/d HH:mm')
+        : '';
       // グリッド上の室内温度・湿度（欠測時間は null）。外気温・予報は毎正時で載る。
       const indoorTemp = gridIndoorTemps[i];
       const humidity = gridHumidities[i];
       const outdoorTemp = outdoorTemperatures[i];
       const targetHour = Math.round((timestamp.getTime() + shiftMs) / HOUR_MS) * HOUR_MS;
-      const row: any[] = [timestamp, indoorTemp, humidity, isNaN(outdoorTemp) ? null : outdoorTemp];
+      const row: any[] = [label, indoorTemp, humidity, isNaN(outdoorTemp) ? null : outdoorTemp];
       if (hasForecast) {
         const fcst = forecastByHour.get(targetHour);
         row.push(fcst !== undefined ? fcst : null);
@@ -488,9 +495,7 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
     const dataRange = chartSheet.getRange(1, 1, chartData.length, numCols);
     dataRange.setValues(chartData);
 
-    // タイムスタンプ列のフォーマット設定
-    chartSheet.getRange(2, 1, chartData.length - 1, 1)
-      .setNumberFormat('m/d hh:mm');
+    // 列0（時刻ラベル）は文字列なので数値フォーマットは不要（6時間毎のみ非空文字）
 
     // データ列を非表示にする
     chartSheet.hideColumns(1, numCols);
@@ -540,16 +545,13 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
       };
     }
     if (hasPrecipForecast) {
-      // 降水確率(予報)はエリア(面)。棒(bars)にすると横軸がカテゴリ軸になり
-      // 6時間毎の目盛り指定(hAxis.ticks)が効かなくなるため、連続軸を保てる面にする。
-      // 湿度と同じ右軸(%)に相乗り（どちらも%で0〜100に収まる）。雨らしい青で塗る。
+      // 降水確率(予報)は棒。COMBO はカテゴリ軸になるが、横軸ラベルを文字列側で
+      // 6時間毎に間引くので目盛りは6時間毎になる。湿度と同じ右軸(%)に相乗りさせる
+      // （どちらも%で0〜100に収まる）。雨らしい青で区別する。
       seriesConfig[precipSeriesIndex] = {
-        type: 'area',
+        type: 'bars',
         targetAxisIndex: 1,
         color: '#AED6F1',
-        areaOpacity: 0.5,
-        lineWidth: 0,
-        pointSize: 0,
         labelInLegend: '降水確率(予報)'
       };
     }
@@ -590,24 +592,8 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
           }
     };
 
-    // 横軸（連続時間軸）の目盛りを6時間毎（JSTの0/6/12/18時）に固定する。
-    // 降水確率をエリアにしたことで連続軸になり、hAxis.ticks（Date配列）が効く。
-    const SIX_HOURS_MS = 6 * HOUR_MS;
-    const axisStartMs = chartTimestamps[0].getTime();
-    const axisEndMs = chartTimestamps[chartTimestamps.length - 1].getTime();
-    const firstTick = new Date(axisStartMs);
-    firstTick.setMinutes(0, 0, 0);
-    firstTick.setHours(firstTick.getHours() - (firstTick.getHours() % 6)); // 直前の6時間境界(JST)に丸める
-    let tickMs = firstTick.getTime();
-    if (tickMs < axisStartMs) {
-      tickMs += SIX_HOURS_MS; // 範囲開始以降の最初の境界から
-    }
-    const hAxisTicks: Date[] = [];
-    for (; tickMs <= axisEndMs; tickMs += SIX_HOURS_MS) {
-      hAxisTicks.push(new Date(tickMs));
-    }
-
-    // グラフを作成（線とエリアを混在させるため COMBO。既定は線で、降水確率のみエリア）
+    // グラフを作成（線と棒を混在させるため COMBO。既定は線で、降水確率のみ棒）。
+    // 横軸は列0の文字列ラベル（6時間毎のみ非空）で間引くので、ticks は使わない。
     const chart = chartSheet.newChart()
       .setChartType(Charts.ChartType.COMBO)
       .addRange(chartSheet.getRange(1, 1, chartData.length, numCols))
@@ -622,8 +608,6 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
         format: 'M/d HH:mm',
         slantedText: true,
         slantedTextAngle: 45,
-        // 連続軸に6時間境界のDateを明示指定して目盛りを6時間毎にする
-        ticks: hAxisTicks,
         minorGridlines: {
           count: 0
         }
