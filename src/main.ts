@@ -579,6 +579,24 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
           }
     };
 
+    // 横軸の目盛りを6時間毎（0/6/12/18時）に固定する。
+    // 埋め込みグラフは gridlines.units.hours.interval を無視するため、
+    // データ範囲内の6時間境界の Date を明示的な ticks として渡す。
+    const SIX_HOURS_MS = 6 * HOUR_MS;
+    const axisStartMs = chartTimestamps[0].getTime();
+    const axisEndMs = chartTimestamps[chartTimestamps.length - 1].getTime();
+    const firstTick = new Date(axisStartMs);
+    firstTick.setMinutes(0, 0, 0);
+    firstTick.setHours(firstTick.getHours() - (firstTick.getHours() % 6)); // 直前の6時間境界に丸める
+    let tickMs = firstTick.getTime();
+    if (tickMs < axisStartMs) {
+      tickMs += SIX_HOURS_MS; // 範囲開始以降の最初の境界から
+    }
+    const hAxisTicks: Date[] = [];
+    for (; tickMs <= axisEndMs; tickMs += SIX_HOURS_MS) {
+      hAxisTicks.push(new Date(tickMs));
+    }
+
     // グラフを作成（線と棒を混在させるため COMBO。既定は線で、降水確率のみ棒）
     const chart = chartSheet.newChart()
       .setChartType(Charts.ChartType.COMBO)
@@ -594,14 +612,8 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
         format: 'M/d HH:mm',
         slantedText: true,
         slantedTextAngle: 45,
-        // 横軸（連続時間軸）の目盛りを6時間毎にする。
-        // units.hours.interval に候補間隔を渡すと、その中から選ばれる（[6]で6時間固定）。
-        gridlines: {
-          units: {
-            days: { format: ['M/d'] },
-            hours: { format: ['M/d HH:mm', 'HH:mm'], interval: [6] }
-          }
-        },
+        // 6時間境界の Date を明示指定して目盛りを6時間毎にする
+        ticks: hAxisTicks,
         minorGridlines: {
           count: 0
         }
