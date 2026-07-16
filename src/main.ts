@@ -297,19 +297,37 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
       timestamps.push(timestamp);
     }
 
+    // 予報は毎正時のデータなので、正時のタイムスタンプ（ミリ秒）をキーにしたMapにする
+    const HOUR_MS = 60 * 60 * 1000;
+
+    // 室内センサーが止まっていても、外気温（実測）・予報は現在まで取得できる。
+    // 最後のセンサー時刻より後の「毎正時」の行を補完してグラフを現在まで伸ばす。
+    // これらの行は室内温度・湿度を空（null）にし、外気温・予報だけを載せる。
+    // センサーが正常に流れているときは補完行が 0 件になり、既存挙動と変わらない。
+    const extensionTimestamps: Date[] = [];
+    {
+      const lastHour = new Date(latestTimestamp);
+      lastHour.setMinutes(0, 0, 0);
+      const nowMs = new Date().getTime();
+      for (let t = lastHour.getTime() + HOUR_MS; t <= nowMs; t += HOUR_MS) {
+        extensionTimestamps.push(new Date(t));
+      }
+    }
+
+    // チャートの時間軸 = 室内センサー時刻 + 補完の毎正時。昇順を保つ（補完分は最後の
+    // センサー時刻より後）。外気温（実測）はこの全時刻分を取得する。
+    const chartTimestamps: Date[] = [...timestamps, ...extensionTimestamps];
+
     // 外気温データを取得（スプレッドシートキャッシュ優先）
     const stationId = getAmedasStationId(config.postalCode);
-    const outdoorTempData = getOutdoorTemperatureWithCache(stationId, timestamps);
+    const outdoorTempData = getOutdoorTemperatureWithCache(stationId, chartTimestamps);
     const outdoorTemperatures: number[] = [];
 
-    // 外気温をdataRowsに追加
-    for (let i = 0; i < dataRows.length; i++) {
+    // 外気温を chartTimestamps と並行の配列にする
+    for (let i = 0; i < chartTimestamps.length; i++) {
       const outdoorTemp = outdoorTempData[i].temperature;
       outdoorTemperatures.push(outdoorTemp !== null ? outdoorTemp : NaN);
     }
-
-    // 予報は毎正時のデータなので、正時のタイムスタンプ（ミリ秒）をキーにしたMapにする
-    const HOUR_MS = 60 * 60 * 1000;
 
     // 今後24時間の外気温予報を取得（取得失敗時は保存済み予報でフォールバック。
     // それも無ければ空配列 → 予報列なしで描画）
@@ -399,8 +417,12 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
     // 実測（今日）と予報（翌日同時刻）を比較できる。予報を実測と同じ行に持たせるので、
     // 行が交互にならず折れ線が途切れない（直近24時間の実測行にのみ予報値が入る）。
     const shiftMs = FORECAST_HOURS_AHEAD * HOUR_MS;
-    for (let i = 0; i < dataRows.length; i++) {
-      const [timestamp, indoorTemp, humidity] = dataRows[i];
+    for (let i = 0; i < chartTimestamps.length; i++) {
+      const timestamp = chartTimestamps[i];
+      // i < dataRows.length は室内センサー行、それ以降は欠測補完行（室内は空）
+      const isSensorRow = i < dataRows.length;
+      const indoorTemp = isSensorRow ? dataRows[i][1] : null;
+      const humidity = isSensorRow ? dataRows[i][2] : null;
       const outdoorTemp = outdoorTemperatures[i];
       const targetHour = Math.round((timestamp.getTime() + shiftMs) / HOUR_MS) * HOUR_MS;
       const row: any[] = [timestamp, indoorTemp, humidity, isNaN(outdoorTemp) ? null : outdoorTemp];
@@ -424,8 +446,10 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
     let subtitle = `室内: 最低 ${indoorTempMin}℃ (${indoorTempMinTime}) / 最高 ${indoorTempMax}℃ (${indoorTempMaxTime})   湿度: 最低 ${humidityMin}% (${humidityMinTime}) / 最高 ${humidityMax}% (${humidityMaxTime})`;
 
     if (outdoorTempMin !== null && outdoorTempMax !== null && outdoorTempMinIndex >= 0 && outdoorTempMaxIndex >= 0) {
-      const outdoorTempMinTime = Utilities.formatDate(timestamps[outdoorTempMinIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
-      const outdoorTempMaxTime = Utilities.formatDate(timestamps[outdoorTempMaxIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
+      // 外気温の min/max インデックスは chartTimestamps（補完行を含む）と並行なので
+      // 時刻ラベルも chartTimestamps を参照する
+      const outdoorTempMinTime = Utilities.formatDate(chartTimestamps[outdoorTempMinIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
+      const outdoorTempMaxTime = Utilities.formatDate(chartTimestamps[outdoorTempMaxIndex], Session.getScriptTimeZone(), 'M/d HH:mm');
       subtitle += `   外気: 最低 ${outdoorTempMin}℃ (${outdoorTempMinTime}) / 最高 ${outdoorTempMax}℃ (${outdoorTempMaxTime})`;
     }
 
@@ -437,6 +461,12 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
 
     if (hasPrecipForecast && forecastProbs.length > 0) {
       subtitle += `   予報降水確率: 最大 ${Math.max(...forecastProbs)}%`;
+    }
+
+    // 室内データが欠測していて外気温・予報で現在まで補完した場合は、その旨を明示する
+    if (extensionTimestamps.length > 0) {
+      const lastIndoorTime = Utilities.formatDate(latestTimestamp, Session.getScriptTimeZone(), 'M/d HH:mm');
+      subtitle += `   ※室内データは ${lastIndoorTime} 以降欠測（外気温・予報で継続）`;
     }
 
     // ここまでで必要なデータ取得が完了。書き込む直前に既存のグラフとデータを削除する
@@ -576,7 +606,10 @@ function updateSingleChart(config: SheetConfig): DataGapInfo | null {
 
     chartSheet.insertChart(chart);
 
-    Logger.log(`${config.dataSheetName}: グラフを更新しました（データ件数: ${recentData.length - 1}件）`);
+    const extensionNote = extensionTimestamps.length > 0
+      ? `（室内 ${dataRows.length}件 + 補完 ${extensionTimestamps.length}件）`
+      : '';
+    Logger.log(`${config.dataSheetName}: グラフを更新しました（データ件数: ${recentData.length - 1}件）${extensionNote}`);
 
     return dataGapInfo;
   } catch (error) {
