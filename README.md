@@ -243,6 +243,37 @@ GASエディタで `setupHourlyTrigger` 関数を実行します。
 設定したトリガーを削除します。
 自動更新を停止したい場合に実行してください。
 
+## 温度・湿度の記録（Mac の launchd）
+
+HomePod mini（2 台。それぞれ別のホームにある）の温度・湿度は、常時起動している Mac の launchd が毎正時にショートカットを実行して Google フォームへ送信し、フォームの回答としてシートに記録されます。
+
+以前は Home.app のオートメーションから「繰り返し＋1 時間待機」で回していましたが、ホームハブの再起動などで止まったまま戻らないことがあったため、1 回で終わる処理を launchd から起動する形に変えました。1 回失敗しても次の正時にまた動きます。
+
+| ファイル | 役割 |
+|---|---|
+| `launchd/run-shortcuts.sh` | 引数のショートカットを順に実行する。失敗したら 1 分後に 1 回だけやり直す |
+| `launchd/com.delphinus.temp-updater.plist` | LaunchAgent の定義。毎正時に起動する |
+| `launchd/shortcuts.local` | 実行するショートカットの名前（1 行に 1 つ）。git の管理外。`shortcuts.local.example` をコピーして作る |
+| `launchd/install.sh` | ショートカット名を plist に埋め込み、Mac に配置して launchd に登録し直す |
+
+```bash
+# 実行するショートカットの名前を書く（初回のみ）
+cp launchd/shortcuts.local.example launchd/shortcuts.local
+
+# ssh で入れる（変更したら同じコマンドで入れ直す。引数を省くと手元の Mac に入れる）
+launchd/install.sh <host>
+
+# すぐに 1 回動かす
+ssh <host> 'launchctl kickstart gui/$(id -u)/com.delphinus.temp-updater'
+
+# ログを見る
+ssh <host> 'tail ~/Library/Logs/temp-updater.log'
+```
+
+- ショートカットの中身は「ショートカット」アプリでしか編集できません（`shortcuts` コマンドにあるのは `run` / `list` / `view` / `sign` だけです）。
+- そのショートカットを初めて動かす Mac では、ホームへのアクセスと `docs.google.com` への送信の許可を求められます。許可するまでダイアログ待ちで止まるので、一度アプリから手で実行して「常に許可」を選んでください。ログに `rc=142`（上限の 300 秒で打ち切り）が出ていたら、まず許可のダイアログが出ていないか確かめてください。
+- Mac が再起動するとログインするまで動きません（FileVault が有効なため）。止まっても GAS のデータ欠損通知で気付けます。
+
 ## 開発
 
 ### ファイル構成
