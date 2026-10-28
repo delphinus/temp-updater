@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.delphinus.temp-updater</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>__HOME__/.local/libexec/temp-updater/run-shortcuts.sh</string>
+    <!-- install.sh が shortcuts.local のショートカット名をここに埋め込む -->
+    __SHORTCUTS__
+  </array>
+  <!-- 毎正時。GAS のグラフ更新 (毎時 :06 頃) より前に送信を終える -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/temp-updater.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/temp-updater.log</string>
+</dict>
+</plist>
